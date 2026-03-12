@@ -8,6 +8,8 @@
 
 **Tech Stack:** Anchor (Rust, Solana), Foundry (Solidity, Base/EVM), TypeScript (publisher service), `@coral-xyz/anchor`, `@solana/web3.js`, `viem`, KafkaJS, ClickHouse, Vitest
 
+**Convention:** All `reportTimestamp` values are **milliseconds since epoch** (`Date.getTime()`), on all chains and in ClickHouse. This is explicit in contract comments, TypeScript code, and test data.
+
 **Spec:** `docs/specs/2026-03-12-agent-economy-oracle-plan2b-on-chain-publication-design.md`
 
 ---
@@ -283,16 +285,17 @@ export interface PublishedFeedRow {
 Add this method to the `OracleClickHouse` class in `packages/core/src/clients/clickhouse.ts` (before the `close()` method):
 
 ```typescript
-  /** Check publication status for a specific feed value (idempotency check). */
+  /** Check publication status for a specific feed value (idempotency check).
+   *  Returns pub_status_rev so callers can increment it for the next status row. */
   async queryPublicationStatus(
     feedId: string,
     feedVersion: number,
     computedAt: string,
     revision: number,
-  ): Promise<{ published_solana: string | null; published_base: string | null } | null> {
+  ): Promise<{ published_solana: string | null; published_base: string | null; pub_status_rev: number } | null> {
     const result = await this.client.query({
       query: `
-        SELECT published_solana, published_base
+        SELECT published_solana, published_base, pub_status_rev
         FROM published_feed_values FINAL
         WHERE feed_id = {feedId:String}
           AND feed_version = {feedVersion:UInt16}
@@ -304,7 +307,7 @@ Add this method to the `OracleClickHouse` class in `packages/core/src/clients/cl
       query_params: { feedId, feedVersion, computedAt, revision },
       format: 'JSONEachRow',
     })
-    const rows = (await result.json()) as Array<{ published_solana: string | null; published_base: string | null }>
+    const rows = (await result.json()) as Array<{ published_solana: string | null; published_base: string | null; pub_status_rev: number }>
     return rows[0] ?? null
   }
 
@@ -720,8 +723,8 @@ pragma solidity ^0.8.20;
 /// @dev Per-feed postReport (intentional deviation from bundled MVR). See spec for rationale.
 contract LucidOracle {
     struct Report {
-        uint64 reportTimestamp;
-        uint64 value;          // scaled by decimals
+        uint64 reportTimestamp; // milliseconds since epoch (matches TypeScript Date.getTime())
+        uint64 value;           // scaled by decimals
         uint8  decimals;
         uint16 confidence;     // basis points (9700 = 0.97)
         uint16 revision;
@@ -833,12 +836,14 @@ contract LucidOracleTest is Test {
 
     // --- postReport ---
 
+    // All timestamps are milliseconds since epoch (matching TypeScript Date.getTime())
+
     function test_postReport_stores_and_emits() public {
         vm.expectEmit(true, false, false, true);
-        emit LucidOracle.ReportPosted(AEGDP, 847_000_000_000, 1710288000, 9700);
+        emit LucidOracle.ReportPosted(AEGDP, 847_000_000_000, 1_710_288_000_000, 9700);
 
         oracle.postReport(
-            AEGDP, 847_000_000_000, 6, 9700, 0, 1710288000,
+            AEGDP, 847_000_000_000, 6, 9700, 0, 1_710_288_000_000,
             bytes32(uint256(0xabc)), bytes32(uint256(0xdef))
         );
 
@@ -847,23 +852,23 @@ contract LucidOracleTest is Test {
         assertEq(r.decimals, 6);
         assertEq(r.confidence, 9700);
         assertEq(r.revision, 0);
-        assertEq(r.reportTimestamp, 1710288000);
+        assertEq(r.reportTimestamp, 1_710_288_000_000);
         assertEq(r.inputManifestHash, bytes32(uint256(0xabc)));
         assertEq(r.computationHash, bytes32(uint256(0xdef)));
     }
 
     function test_postReport_accepts_newer_timestamp() public {
-        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1000, bytes32(0), bytes32(0));
-        oracle.postReport(AEGDP, 200, 6, 9700, 0, 2000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1_000_000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 200, 6, 9700, 0, 2_000_000, bytes32(0), bytes32(0));
 
         LucidOracle.Report memory r = oracle.getLatestReport(AEGDP);
         assertEq(r.value, 200);
-        assertEq(r.reportTimestamp, 2000);
+        assertEq(r.reportTimestamp, 2_000_000);
     }
 
     function test_postReport_accepts_same_timestamp_higher_revision() public {
-        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1000, bytes32(0), bytes32(0));
-        oracle.postReport(AEGDP, 105, 6, 9700, 1, 1000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1_000_000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 105, 6, 9700, 1, 1_000_000, bytes32(0), bytes32(0));
 
         LucidOracle.Report memory r = oracle.getLatestReport(AEGDP);
         assertEq(r.value, 105);
@@ -871,28 +876,28 @@ contract LucidOracleTest is Test {
     }
 
     function test_postReport_rejects_stale_timestamp_same_revision() public {
-        oracle.postReport(AEGDP, 100, 6, 9700, 0, 2000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 100, 6, 9700, 0, 2_000_000, bytes32(0), bytes32(0));
 
         vm.expectRevert(LucidOracle.StaleReport.selector);
-        oracle.postReport(AEGDP, 200, 6, 9700, 0, 1000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 200, 6, 9700, 0, 1_000_000, bytes32(0), bytes32(0));
     }
 
     function test_postReport_rejects_same_timestamp_same_revision() public {
-        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1_000_000, bytes32(0), bytes32(0));
 
         vm.expectRevert(LucidOracle.StaleReport.selector);
-        oracle.postReport(AEGDP, 200, 6, 9700, 0, 1000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 200, 6, 9700, 0, 1_000_000, bytes32(0), bytes32(0));
     }
 
     function test_postReport_rejects_non_authority() public {
         vm.prank(nonAuthority);
         vm.expectRevert(LucidOracle.NotAuthority.selector);
-        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1_000_000, bytes32(0), bytes32(0));
     }
 
     function test_postReport_independent_feeds() public {
-        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1000, bytes32(0), bytes32(0));
-        oracle.postReport(AAI, 742, 0, 9500, 0, 1000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1_000_000, bytes32(0), bytes32(0));
+        oracle.postReport(AAI, 742, 0, 9500, 0, 1_000_000, bytes32(0), bytes32(0));
 
         assertEq(oracle.getLatestReport(AEGDP).value, 100);
         assertEq(oracle.getLatestReport(AAI).value, 742);
@@ -923,7 +928,7 @@ contract LucidOracleTest is Test {
         oracle.rotateAuthority(newAuth);
 
         vm.expectRevert(LucidOracle.NotAuthority.selector);
-        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1000, bytes32(0), bytes32(0));
+        oracle.postReport(AEGDP, 100, 6, 9700, 0, 1_000_000, bytes32(0), bytes32(0));
     }
 
     function test_rotateAuthority_rejects_zero_address() public {
@@ -1094,6 +1099,7 @@ pub struct FeedReport {
     /// Schema version
     pub feed_version: u16,
     /// Unix timestamp in milliseconds
+    /// Milliseconds since epoch (matches TypeScript Date.getTime())
     pub report_timestamp: i64,
     /// Value scaled by decimals
     pub value: u64,
@@ -1728,7 +1734,9 @@ describe("lucid-oracle", () => {
   });
 
   it("post_report rejects stale timestamp + same revision", async () => {
-    const message = buildReportMessage(feedId, BigInt(1000), BigInt(100), 6, 9700, 0, zeroHash, zeroHash);
+    // Use a timestamp guaranteed to be older than the one already stored
+    const staleTimestamp = BigInt(1_000_000); // milliseconds — well before Date.now()
+    const message = buildReportMessage(feedId, staleTimestamp, BigInt(100), 6, 9700, 0, zeroHash, zeroHash);
     const sig = ed.sign(message, signerPrivKey);
     const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
       publicKey: signerPubKey, message, signature: sig,
@@ -1736,7 +1744,7 @@ describe("lucid-oracle", () => {
 
     try {
       await program.methods
-        .postReport(new anchor.BN(100), 6, 9700, 0, new anchor.BN(1000), zeroHash, zeroHash)
+        .postReport(new anchor.BN(100), 6, 9700, 0, new anchor.BN(staleTimestamp.toString()), zeroHash, zeroHash)
         .accounts({
           feedConfig: feedConfigPda, feedReport: feedReportPda,
           authority: provider.wallet.publicKey, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
@@ -2125,7 +2133,7 @@ export async function postToBase(
   const addr = contractAddress ?? (process.env.BASE_CONTRACT_ADDRESS as `0x${string}`)
   const { value, decimals } = encodeOnChainValue(req.feed_id as FeedId, req.value_usd, req.value_index)
   const confidenceBps = Math.round(req.confidence * 10000)
-  const timestamp = BigInt(new Date(req.computed_at).getTime())
+  const timestamp = BigInt(new Date(req.computed_at).getTime()) // milliseconds since epoch
 
   let lastError: Error | undefined
   for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt++) {
@@ -2185,7 +2193,7 @@ git commit -m "feat: add Base chain posting with 3x retry — postToBase()"
 ```typescript
 // apps/publisher/src/__tests__/solana.test.ts
 import { describe, it, expect, vi } from 'vitest'
-import { buildReportMessage, buildEd25519VerifyInstruction } from '../solana.js'
+import { buildReportMessage, buildEd25519VerifyInstruction, serializePostReportData } from '../solana.js'
 
 describe('buildReportMessage', () => {
   it('produces 101-byte canonical message', () => {
@@ -2224,6 +2232,38 @@ describe('buildEd25519VerifyInstruction', () => {
       Buffer.alloc(101), // message
     )
     expect(ix.programId.toBase58()).toBe('Ed25519SigVerify111111111111111111111111111')
+  })
+})
+
+describe('serializePostReportData', () => {
+  it('produces 101-byte buffer with 8-byte discriminator + 93-byte args', () => {
+    const data = serializePostReportData(
+      BigInt(847_000_000_000), // value
+      6, // decimals
+      9700, // confidence
+      0, // revision
+      BigInt(1710288000000), // reportTimestamp (milliseconds)
+      Buffer.alloc(32, 0xab), // inputManifestHash
+      Buffer.alloc(32, 0xcd), // computationHash
+    )
+
+    expect(data.length).toBe(101) // 8 discriminator + 93 args
+    // First 8 bytes are the SHA-256 discriminator of "global:post_report"
+    expect(data.subarray(0, 8).length).toBe(8)
+    // value at offset 8 (u64 LE)
+    expect(data.readBigUInt64LE(8)).toBe(BigInt(847_000_000_000))
+    // decimals at offset 16 (u8)
+    expect(data[16]).toBe(6)
+    // confidence at offset 17 (u16 LE)
+    expect(data.readUInt16LE(17)).toBe(9700)
+    // revision at offset 19 (u16 LE)
+    expect(data.readUInt16LE(19)).toBe(0)
+    // report_timestamp at offset 21 (i64 LE)
+    expect(data.readBigInt64LE(21)).toBe(BigInt(1710288000000))
+    // input_manifest_hash at offset 29 (32 bytes)
+    expect(data[29]).toBe(0xab)
+    // computation_hash at offset 61 (32 bytes)
+    expect(data[61]).toBe(0xcd)
   })
 })
 ```
@@ -2297,6 +2337,37 @@ export function buildEd25519VerifyInstruction(
   })
 }
 
+/** Anchor discriminator for `post_report`: first 8 bytes of SHA-256("global:post_report"). */
+const POST_REPORT_DISCRIMINATOR = Buffer.from(
+  createHash('sha256').update('global:post_report').digest().subarray(0, 8),
+)
+
+/** Serialize Anchor instruction data for post_report: discriminator + Borsh args.
+ *  Args layout (LE): value(u64) + decimals(u8) + confidence(u16) + revision(u16)
+ *  + report_timestamp(i64) + input_manifest_hash([u8;32]) + computation_hash([u8;32])
+ *  = 8 + 8 + 1 + 2 + 2 + 8 + 32 + 32 = 93 bytes total (+ 8 discriminator = 101). */
+export function serializePostReportData(
+  value: bigint,
+  decimals: number,
+  confidence: number,
+  revision: number,
+  reportTimestamp: bigint,
+  inputManifestHash: Buffer,
+  computationHash: Buffer,
+): Buffer {
+  const buf = Buffer.alloc(8 + 93) // discriminator + args
+  let offset = 0
+  POST_REPORT_DISCRIMINATOR.copy(buf, offset); offset += 8
+  buf.writeBigUInt64LE(value, offset); offset += 8
+  buf.writeUInt8(decimals, offset); offset += 1
+  buf.writeUInt16LE(confidence, offset); offset += 2
+  buf.writeUInt16LE(revision, offset); offset += 2
+  buf.writeBigInt64LE(reportTimestamp, offset); offset += 8
+  inputManifestHash.copy(buf, offset); offset += 32
+  computationHash.copy(buf, offset)
+  return buf
+}
+
 export interface SolanaClient {
   connection: Connection
   keypair: Keypair
@@ -2311,7 +2382,7 @@ export async function postToSolana(
 ): Promise<string> {
   const { value, decimals } = encodeOnChainValue(req.feed_id as FeedId, req.value_usd, req.value_index)
   const confidenceBps = Math.round(req.confidence * 10000)
-  const timestamp = BigInt(new Date(req.computed_at).getTime())
+  const timestamp = BigInt(new Date(req.computed_at).getTime()) // milliseconds since epoch
 
   const feedIdBuf = Buffer.alloc(16)
   feedIdBuf.write(req.feed_id, 'utf8')
@@ -2347,8 +2418,12 @@ export async function postToSolana(
     try {
       const { blockhash } = await client.connection.getLatestBlockhash()
 
-      // Build post_report instruction using raw instruction data
-      // (In production, use the Anchor IDL-generated client)
+      // Build post_report instruction data: 8-byte Anchor discriminator + Borsh-serialized args
+      const postReportData = serializePostReportData(
+        value, decimals, confidenceBps, req.revision, timestamp,
+        inputManifestHash, computationHash,
+      )
+
       const postReportIx = new TransactionInstruction({
         programId: client.programId,
         keys: [
@@ -2357,7 +2432,7 @@ export async function postToSolana(
           { pubkey: client.keypair.publicKey, isSigner: true, isWritable: false },
           { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
         ],
-        data: Buffer.alloc(0), // Anchor serialization — use IDL client in implementation
+        data: postReportData,
       })
 
       const messageV0 = new TransactionMessage({
@@ -2387,7 +2462,7 @@ function sleep(ms: number): Promise<void> {
 - [ ] **Step 4: Run tests**
 
 Run: `npx vitest run apps/publisher/src/__tests__/solana.test.ts`
-Expected: 2 tests PASS
+Expected: 3 tests PASS
 
 - [ ] **Step 5: Commit**
 
@@ -2451,10 +2526,10 @@ describe('recordPublicationStatus', () => {
     expect(mockClickhouse.insertPublishedFeedValue).not.toHaveBeenCalled()
   })
 
-  it('skips chains already published (idempotency)', async () => {
+  it('skips chains already published (idempotency) and increments pub_status_rev', async () => {
     const mockClickhouse = {
       queryPublicationStatus: vi.fn().mockResolvedValue({
-        published_solana: '0xalready', published_base: null,
+        published_solana: '0xalready', published_base: null, pub_status_rev: 1,
       }),
       insertPublishedFeedValue: vi.fn().mockResolvedValue(undefined),
     }
@@ -2467,6 +2542,9 @@ describe('recordPublicationStatus', () => {
     // Should skip Solana (already published) but include Base
     expect(result.skipSolana).toBe(true)
     expect(result.skipBase).toBe(false)
+    // pub_status_rev should increment from existing (1 → 2)
+    const row = mockClickhouse.insertPublishedFeedValue.mock.calls[0][0]
+    expect(row.pub_status_rev).toBe(2)
   })
 })
 ```
@@ -2516,7 +2594,7 @@ export async function recordPublicationStatus(
     feed_version: req.feed_version,
     computed_at: req.computed_at,
     revision: req.revision,
-    pub_status_rev: 1,
+    pub_status_rev: (existing?.pub_status_rev ?? 0) + 1,
     value_json: req.value_json,
     value_usd: req.value_usd,
     value_index: req.value_index,
