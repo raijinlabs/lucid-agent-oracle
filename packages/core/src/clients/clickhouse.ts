@@ -85,11 +85,13 @@ export class OracleClickHouse {
           sum(success_count) AS total_success,
           sum(error_count) AS total_errors
         FROM metric_rollups_1m
-        WHERE bucket >= {from:DateTime} AND bucket < {to:DateTime}
+        WHERE feed_id = {feedId:String}
+          AND bucket >= {from:DateTime} AND bucket < {to:DateTime}
         GROUP BY bucket
         ORDER BY bucket
       `,
       query_params: {
+        feedId,
         from: fromMinute.toISOString(),
         to: toMinute.toISOString(),
       },
