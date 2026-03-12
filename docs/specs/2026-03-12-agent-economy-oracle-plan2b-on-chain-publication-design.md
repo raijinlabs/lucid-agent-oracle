@@ -397,6 +397,8 @@ One row per publication attempt, not one per chain. If both chains fail, no stat
 
 **ClickHouse migration required:** The existing `ReplacingMergeTree(revision)` engine needs to change to `ReplacingMergeTree(pub_status_rev)` with a new `pub_status_rev UInt16 DEFAULT 0` column. Since ClickHouse does not support `ALTER TABLE ... MODIFY ENGINE`, this requires a drop-and-recreate of `published_feed_values` (acceptable in Plan 2B since no production data exists yet).
 
+**Future note (Plan 3+):** When restatements (`revision > 0`) are implemented, extend the ORDER BY key to `(feed_id, feed_version, computed_at, revision)` so that each computation revision has its own dedup group. Without this, a restatement row (`revision = 1, pub_status_rev = 0`) sharing the same `computed_at` as a published original (`revision = 0, pub_status_rev = 1`) would be deduplicated away. Not a Plan 2B concern — all rows use `revision = 0`.
+
 This avoids `ALTER TABLE UPDATE` mutations entirely. The publisher only ever **inserts** — ClickHouse's ReplacingMergeTree handles dedup by keeping the row with the highest `pub_status_rev` for each `(feed_id, feed_version, computed_at)` key.
 
 **Partial success handling:** If Solana succeeds but Base fails (or vice versa), a revision-row is inserted with the successful chain's tx hash and `null` for the failed chain. The failed chain is retried on the next attempt.
