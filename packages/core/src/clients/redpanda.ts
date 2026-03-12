@@ -55,6 +55,15 @@ export class RedpandaProducer {
     })
   }
 
+  /** Publish a generic JSON message (for INDEX_UPDATES fanout). */
+  async publishJson(topic: string, key: string, value: unknown): Promise<void> {
+    if (!this.producer) throw new Error('Producer not connected')
+    await this.producer.send({
+      topic,
+      messages: [{ key, value: JSON.stringify(value) }],
+    })
+  }
+
   /** Disconnect the producer */
   async disconnect(): Promise<void> {
     await this.producer?.disconnect()
