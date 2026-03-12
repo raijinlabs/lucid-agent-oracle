@@ -41,11 +41,11 @@ On each tick:
 
 5. **Compute** — Query ClickHouse rollups for the current computation window (`now - COMPUTATION_WINDOW_MS` to `now`) using `-Merge` aggregate functions. Run all 3 feed functions (`computeAEGDP`, `computeAAI`, `computeAPRI`). Each returns a typed result with provenance hashes. **Note:** APRI's `provider_concentration` (HHI) requires per-provider event counts, which the rollup's `uniq` aggregate does not provide. The worker queries `raw_economic_events` directly for HHI computation, while using rollups for all other metrics. This is an acceptable trade-off for Plan 2A; a dedicated per-provider count rollup can be added in v2 if query cost becomes an issue.
 
-6. **Threshold check** — Compare new value against latest published value from ClickHouse `published_feed_values` for the same `feed_id`, same `feed_version`, latest revision where `revision_status != 'superseded'`. In Plan 2A, all publications are `revision_status = 'preliminary'` (no settlement finality), so this filter simply picks the most recent `computed_at` with `revision = 0`. The `superseded` status is reserved for future plans when re-attestation with corrected data replaces an earlier value. Publish only if:
+6. **Threshold check** — Compare new value against latest published value from ClickHouse `published_feed_values` for the same `feed_id` and `feed_version`, filtered by `WHERE revision_status != 'superseded'`, ordered by `computed_at DESC LIMIT 1`. The correct SQL filter is always `revision_status != 'superseded'` — do NOT substitute `revision = 0` even though they produce the same result in Plan 2A (where all rows are `preliminary` with `revision = 0`). The `superseded` status is reserved for future plans when re-attestation with corrected data replaces an earlier value. Publish only if:
    - **Heartbeat:** No publication for this feed in the last `HEARTBEAT_INTERVAL_MS` (default 15 minutes). This is intentionally longer than `POLL_INTERVAL_MS` (5 minutes): the worker computes every cycle but only publishes on heartbeat if the value hasn't deviated. Proves liveness without flooding downstream consumers.
    - **Deviation:** Value changed by more than threshold (AEGDP: 100bps, AAI: 200bps, APRI: 500bps)
 
-7. **Attest** — Sign changed feed values via `AttestationService.signReport()`. Produces a `ReportEnvelope` with multi-signer-ready structure.
+7. **Attest** — Sign changed feed values via `AttestationService.signReport()` (Plan 1 artifact in `@lucid/oracle-core`). Produces a `ReportEnvelope` with multi-signer-ready structure.
 
 8. **Persist** — Insert attested values into ClickHouse `published_feed_values` (source of truth).
 
@@ -96,10 +96,12 @@ Risk score [0, 10000] basis points. **Higher = more risk.** Four weighted dimens
 |----------|--------|-----------|-------|
 | `error_rate` | 0.30 | Fraction with `status = 'error'` | `llm_inference` + `tool_call` only |
 | `provider_concentration` | 0.25 | HHI across `provider` values (event-count in v1, value-weighted in v2) | `llm_inference` + `tool_call` where `provider IS NOT NULL` |
-| `authenticity_ratio` | 0.25 | `1 - (authentic events / total events)` — low authenticity = risk | All events |
-| `activity_continuity` | 0.20 | `1 - (active 1-min buckets / total buckets)` — gaps = risk. Computed from `metric_rollups_1m`: count buckets with `event_count > 0` in the window. | All events |
+| `authenticity_ratio` | 0.25 | `1 - (authentic events / total events)` — low authenticity = risk. If `total events = 0`, defaults to `0` (no risk signal). | All events |
+| `activity_continuity` | 0.20 | `1 - (active 1-min buckets / total buckets)` — gaps = risk. `total buckets` = `COMPUTATION_WINDOW_MS / 60000` (e.g., 60 for a 1-hour window), a fixed denominator. `active buckets` = count of distinct `bucket` values in `metric_rollups_1m` with `event_count > 0` in the window. | All events |
 
 Weights versioned in `APRI_WEIGHTS` constant. Each dimension outputs [0, 10000]. Final APRI = weighted sum.
+
+**Zero-event guard:** All APRI dimensions that involve division (`error_rate`, `authenticity_ratio`, `activity_continuity`) default to `0` when their denominator is zero. This means an empty window produces APRI = 0 (no risk signal), which is appropriate — no data means no observable risk, not maximum risk. The feed still publishes on heartbeat with `completeness: 0` to signal the empty-window condition.
 
 Both functions return `input_manifest_hash` + `computation_hash` for provenance, following the same pattern as `computeAEGDP`.
 
@@ -183,12 +185,12 @@ SELECT
   source, protocol, chain, event_type,
   toUInt64(count()) AS event_count,
   toUInt64(countIf(economic_authentic = 1)) AS authentic_count,
-  sumIf(usd_value, usd_value IS NOT NULL) AS total_usd_value,
+  coalesce(sumIf(assumeNotNull(usd_value), usd_value IS NOT NULL), toDecimal64(0, 6)) AS total_usd_value,
   toUInt64(countIf(status = 'success')) AS success_count,
   toUInt64(countIf(status = 'error')) AS error_count,
   uniqState(coalesce(subject_entity_id, subject_raw_id, '')) AS distinct_subjects,
   uniqState(coalesce(provider, '')) AS distinct_providers,
-  uniqState(tuple(coalesce(model_id, ''), coalesce(provider, '')))
+  uniqStateIf(tuple(model_id, provider), model_id IS NOT NULL AND provider IS NOT NULL)
     AS distinct_model_provider_pairs
 FROM raw_economic_events
 WHERE corrects_event_id IS NULL
@@ -251,6 +253,14 @@ CREATE TABLE IF NOT EXISTS oracle_worker_checkpoints (
   last_seen_id     TEXT NOT NULL,
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Seed rows: worker upserts on first run, but seeds provide correct watermark_column
+INSERT INTO oracle_worker_checkpoints (source_table, watermark_column, last_seen_ts, last_seen_id)
+VALUES
+  ('receipt_events',          'created_at', '1970-01-01T00:00:00Z', ''),
+  ('mcpgate_audit_log',       'created_at', '1970-01-01T00:00:00Z', ''),
+  ('gateway_payment_sessions','updated_at',  '1970-01-01T00:00:00Z', '')
+ON CONFLICT (source_table) DO NOTHING;
 ```
 
 ---
