@@ -64,7 +64,9 @@ Plan 4A adds:
 | Contract | Address | Events |
 |----------|---------|--------|
 | Identity Registry | `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` | `AgentRegistered`, `AgentUpdated`, `OwnershipTransferred` |
-| Reputation Registry | `0x8004BAa17C55a88189AE136b182e5fdA19dE9b63` | `ReputationUpdated`, `ValidationRecorded` |
+| Reputation Registry | `0x8004BAa17C55a88189AE136b182e5fdA19dE9b63` | `ReputationUpdated` |
+
+> **Note:** `ValidationRecorded` events from the Validation Registry are deferred — the standard is under active development. Plan 4A indexes Identity + Reputation only.
 
 ### Event Normalization
 
@@ -72,9 +74,10 @@ ERC-8004 events are normalized into a typed envelope before publishing to `raw.e
 
 ```typescript
 interface ERC8004Event {
-  event_id: string            // deterministic: sha256(source, chain, tx_hash, log_index)
+  event_id: string            // deterministic UUID v5 from namespace + (source, chain, tx_hash, log_index)
+                              // matches parent spec's raw_economic_events.event_id UUID format
   event_type: 'agent_registered' | 'agent_updated' | 'ownership_transferred'
-             | 'reputation_updated' | 'validation_recorded'
+             | 'reputation_updated'
   source: 'erc8004'
   chain: 'base'
   block_number: number
@@ -85,9 +88,9 @@ interface ERC8004Event {
   // Identity fields
   agent_id: string            // ERC-8004 agentId (hex)
   owner_address: string       // checksummed
-  tba_address: string | null  // Token-Bound Account if applicable
+  tba_address: string | null  // Token-Bound Account if applicable (null for non-TBA agents)
 
-  // Reputation fields (for reputation events)
+  // Reputation fields (for reputation_updated events only)
   reputation_score: number | null
   validator_address: string | null
   evidence_hash: string | null
@@ -97,9 +100,7 @@ interface ERC8004Event {
 }
 ```
 
-### Validation Registry
-
-The Validation Registry portion of ERC-8004 is under active development. Plan 4A indexes Identity + Reputation only. Validation indexing is deferred until the standard stabilizes.
+**`event_id` derivation:** Use UUID v5 with a fixed namespace UUID and the natural key `(source, chain, tx_hash, log_index)` as the name. This produces a deterministic UUID compatible with the parent spec's `raw_economic_events.event_id UUID` column.
 
 ---
 
@@ -114,16 +115,23 @@ Indexes economic activity for known agent wallets on Base:
 
 Normalizes into `raw_economic_events` format and publishes to `raw.agent_wallets.events`.
 
-**Watchlist management:**
-- Known wallets loaded from `wallet_mappings` table on startup
-- Refreshed when resolver publishes `wallet_watchlist.updated` to Redpanda
-- In-memory set of watched addresses, updated without Ponder restart
+**Watchlist filtering strategy:**
+
+Ponder's contract/event filters are declared at startup in `ponder.config.ts` and cannot be dynamically modified at runtime. The wallet handler therefore uses a **broad index + application-layer filter** approach:
+
+1. Ponder indexes all ERC-20 Transfer events for tracked token contracts (USDC, USDT, WETH) — not per-wallet, per-token-contract
+2. The `wallet-activity.ts` handler maintains an in-memory `Set<string>` of watched addresses, loaded from `wallet_mappings` on startup
+3. On each Transfer event, the handler checks if `from` or `to` is in the watched set — if not, the event is discarded silently
+4. When the resolver publishes `wallet_watchlist.updated`, the handler refreshes its in-memory set from Postgres — no Ponder restart needed
+
+**Cost/performance note:** This means Ponder processes all Transfer events on tracked token contracts, not just agent wallets. For USDC/USDT on Base, this is high volume. Mitigation: the filter check is O(1) Set lookup, and discarded events never reach Redpanda. If volume becomes problematic, the token contract list can be narrowed or event processing batched.
 
 ### 4.2 Solana — Helius
 
 **Live ingestion — Webhooks:**
 - Webhook endpoint: `POST /v1/internal/helius/webhook` in the oracle API
-- Monitors known Solana agent wallets from `wallet_mappings WHERE chain = 'solana'`
+- **Authentication:** Verifies Helius HMAC-SHA256 signature using `HELIUS_WEBHOOK_SECRET` env var. Returns 401 on signature mismatch. Follows the same pattern as LucidMerged's launchpad Helius integration.
+- Monitors known Solana agent wallets from `wallet_mappings WHERE chain = 'solana' AND removed_at IS NULL`
 - Helius Enhanced Transaction format → normalized `raw_economic_events` → `raw.agent_wallets.events`
 - Idempotent via deterministic `event_id` from `(source, chain, tx_hash, instruction_index)`
 - Helius may retry deliveries and produce duplicates — handled by existing idempotent ingestion
@@ -149,7 +157,7 @@ Wallet activity events reuse the existing `raw_economic_events` schema with thes
 | `event_type` | `'transfer'`, `'swap'`, `'contract_interaction'` |
 | `subject_raw_id` | wallet address |
 | `counterparty_raw_id` | destination/counterparty address |
-| `protocol` | `'independent'` (resolved later via identity links) |
+| `protocol` | `'independent'` — permanent value for wallet activity not attributed to a specific protocol. AEGDP correctly includes the `independent` slice in its aggregate sum. |
 | `amount` | transfer amount in native units |
 | `currency` | token symbol |
 | `usd_value` | USD equivalent at time of transaction |
@@ -189,7 +197,8 @@ CREATE TABLE wallet_mappings (
   confidence    REAL DEFAULT 1.0,        -- 1.0 for deterministic (Plan 4A), <1.0 for heuristic (future)
   evidence_hash TEXT,                    -- SHA-256 of proof
   created_at    TIMESTAMPTZ DEFAULT now(),
-  UNIQUE (chain, address)               -- one wallet → one agent entity
+  removed_at    TIMESTAMPTZ,             -- soft-delete for ownership transfers (NULL = active)
+  UNIQUE (chain, address)               -- one wallet → one agent entity (active only)
 );
 
 CREATE INDEX idx_wallet_mappings_entity ON wallet_mappings(agent_entity);
@@ -218,7 +227,9 @@ CREATE INDEX idx_identity_links_entity ON identity_links(agent_entity);
 - `confidence` is always 1.0 in Plan 4A. Column exists for Plan 4B heuristic strategies without schema migration.
 - `link_type` values are extensible strings, not enums — future strategies add new types without ALTER.
 - `UNIQUE (chain, address)` enforces one-wallet-one-agent — deterministic resolver cannot produce multi-match.
+- `removed_at` on `wallet_mappings` enables soft-delete for ownership transfers while preserving the audit trail.
 - `evidence_hash` / `evidence_json` provide audit trail for every link.
+- **`identity_evidence` table** (referenced in parent spec §4.5) is deferred to Plan 4B. Plan 4A stores evidence inline in `identity_links.evidence_json`. Evidence volumes in deterministic-only mode are low enough for inline storage.
 
 ---
 
@@ -236,26 +247,32 @@ Triggered by: new event on `raw.erc8004.events`
    - Extract `agentId`, `owner`, `tba_address` from event
    - Check if `agent_entities` row exists for this `erc8004_id`
    - If not: create new `agent_entity` with `id = 'ae_' + nanoid()`, `erc8004_id = agentId`
-   - Upsert `wallet_mappings` for TBA address (`chain: 'base'`, `link_type: 'erc8004_tba'`)
+   - If `tba_address` is not null: upsert `wallet_mappings` for TBA address (`chain: 'base'`, `link_type: 'erc8004_tba'`). If `tba_address` is null, skip TBA mapping.
    - Upsert `wallet_mappings` for owner address (`chain: 'base'`, `link_type: 'erc8004_owner'`)
    - Create `identity_links` row (`protocol: 'erc8004'`, `link_type: 'on_chain_proof'`)
    - Publish `wallet_watchlist.updated` to Redpanda with new Base addresses
 
-2. **`ReputationUpdated`** event:
+2. **`AgentUpdated`** event:
+   - Look up `agent_entity` by `erc8004_id`
+   - If found: update `display_name` if metadata contains a name field; update `updated_at`
+   - If agent not found: log warning, skip
+   - No wallet changes — `AgentUpdated` reflects metadata updates, not ownership
+
+3. **`ReputationUpdated`** event:
    - Look up `agent_entity` by `erc8004_id`
    - Update `reputation_json` and `reputation_updated_at`
    - If agent not found: log warning, skip (reputation without identity registration is unexpected)
 
-3. **`OwnershipTransferred`** event:
-   - Update `wallet_mappings` for old owner → remove or mark inactive
-   - Add `wallet_mappings` for new owner
-   - Publish `wallet_watchlist.updated`
+4. **`OwnershipTransferred`** event:
+   - Soft-delete old owner's `wallet_mappings` row: set `removed_at = now()` (preserves audit trail)
+   - Add new `wallet_mappings` for new owner address (`link_type: 'erc8004_owner'`)
+   - Publish `wallet_watchlist.updated` with both `remove` (old) and `add` (new) actions
 
 ### 6.3 Lucid-Native Resolution
 
 Runs on API startup (batch) and can be re-triggered manually:
 
-1. Query `gateway_tenants` for tenants with associated wallet addresses
+1. Query `gateway_tenants` for tenants with wallet addresses stored in `payment_config` JSONB column (path: `payment_config->'wallets'`, an array of `{chain, address}` objects). Tenants without `payment_config` or without a `wallets` array are skipped.
 2. For each tenant:
    - Create `agent_entity` with `lucid_tenant = tenant.id`
    - Add `wallet_mappings` for each known wallet (`link_type: 'lucid_passport'`, `confidence: 1.0`)
@@ -293,6 +310,11 @@ Publishes wallet_watchlist.updated (Redpanda)
     └──→ Helius watchlist manager: calls Helius API to add address to webhook
 ```
 
+**Topic configuration for `wallet_watchlist.updated`:**
+- Partitions: 1 (ordering matters — add before remove)
+- Retention: 1 day
+- Consumer groups: each consumer (Ponder wallet handler, Helius watchlist manager) uses a distinct group ID so both receive all events
+
 The `wallet_watchlist.updated` event payload:
 
 ```typescript
@@ -323,6 +345,8 @@ The following updates to the parent design spec are required to align with Plan 
 2. **Redpanda topic table**: `raw.agent_wallets.events` can be produced by both Helius (Solana) and Ponder (Base/EVM), not only "Helius/Alchemy webhook handlers."
 
 3. **Feed methodology note**: Add a note to the feed definitions section stating that AAI/APRI methodology v2 will be required when cross-protocol economic data begins flowing.
+
+4. **Redpanda topic table**: Add `wallet_watchlist.updated` (1 partition, 1 day retention, consumers: identity-resolver, wallet-watchlist service).
 
 ---
 
