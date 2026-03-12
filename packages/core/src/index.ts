@@ -1,5 +1,6 @@
 // Types
 export * from './types/index.js'
+export { encodeOnChainValue, type PublicationRequest, type OnChainValue } from './types/publication.js'
 
 // Services
 export { computeConfidence, computeFreshnessScore, computeStalenessRisk } from './services/confidence-service.js'
