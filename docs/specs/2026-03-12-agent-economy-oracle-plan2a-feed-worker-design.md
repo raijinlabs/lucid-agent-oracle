@@ -12,7 +12,10 @@
 - `event_id`: `String` not `UUID` — `computeEventId` produces a SHA-256 hash truncated to UUID format, not a true RFC 4122 UUID. `String` is more accurate.
 - `amount`: `String` not `Decimal128(18)` — stored as string for precision safety, matching the TypeScript type. AEGDP computes from `usd_value`, not `amount`.
 - `published_solana`/`published_base`: collapsed from `(Bool + tx_hash)` to `Nullable(String)` — null = not published, non-null = tx hash. Simpler for Plan 2A.
-- `ORDER BY` keys: optimized for Plan 2A query patterns, not identical to global spec. Documented per table.
+- `ORDER BY` keys: optimized for Plan 2A query patterns, not identical to global spec:
+  - `raw_economic_events`: `(source, chain, event_type, event_timestamp, event_id)` — global spec uses `(event_timestamp, event_id)`. Our key leads with analytical dimensions for filtered scans matching the MV GROUP BY.
+  - `metric_rollups_1m`: `(bucket, source, protocol, chain, event_type)` — matches global spec GROUP BY pattern.
+  - `published_feed_values`: `(feed_id, feed_version, computed_at)` — global spec uses `(feed_id, computed_at)`. Added `feed_version` to support multi-version dedup within ReplacingMergeTree.
 
 **Computation window:** All feed computations use a **rolling 1-hour window** (`COMPUTATION_WINDOW_MS`, default 3,600,000ms). The worker queries rollups from `(now - window)` to `now`. This provides enough data density for meaningful metrics while keeping query scope bounded.
 
@@ -38,8 +41,8 @@ On each tick:
 
 5. **Compute** — Query ClickHouse rollups for the current computation window (`now - COMPUTATION_WINDOW_MS` to `now`) using `-Merge` aggregate functions. Run all 3 feed functions (`computeAEGDP`, `computeAAI`, `computeAPRI`). Each returns a typed result with provenance hashes. **Note:** APRI's `provider_concentration` (HHI) requires per-provider event counts, which the rollup's `uniq` aggregate does not provide. The worker queries `raw_economic_events` directly for HHI computation, while using rollups for all other metrics. This is an acceptable trade-off for Plan 2A; a dedicated per-provider count rollup can be added in v2 if query cost becomes an issue.
 
-6. **Threshold check** — Compare new value against latest published value from ClickHouse `published_feed_values` for the same `feed_id`, same `feed_version`, latest non-superseded revision. Publish only if:
-   - **Heartbeat:** No publication for this feed in the last 5 minutes (proves liveness even if value unchanged)
+6. **Threshold check** — Compare new value against latest published value from ClickHouse `published_feed_values` for the same `feed_id`, same `feed_version`, latest revision where `revision_status != 'superseded'`. In Plan 2A, all publications are `revision_status = 'preliminary'` (no settlement finality), so this filter simply picks the most recent `computed_at` with `revision = 0`. The `superseded` status is reserved for future plans when re-attestation with corrected data replaces an earlier value. Publish only if:
+   - **Heartbeat:** No publication for this feed in the last `HEARTBEAT_INTERVAL_MS` (default 15 minutes). This is intentionally longer than `POLL_INTERVAL_MS` (5 minutes): the worker computes every cycle but only publishes on heartbeat if the value hasn't deviated. Proves liveness without flooding downstream consumers.
    - **Deviation:** Value changed by more than threshold (AEGDP: 100bps, AAI: 200bps, APRI: 500bps)
 
 7. **Attest** — Sign changed feed values via `AttestationService.signReport()`. Produces a `ReportEnvelope` with multi-signer-ready structure.
@@ -94,7 +97,7 @@ Risk score [0, 10000] basis points. **Higher = more risk.** Four weighted dimens
 | `error_rate` | 0.30 | Fraction with `status = 'error'` | `llm_inference` + `tool_call` only |
 | `provider_concentration` | 0.25 | HHI across `provider` values (event-count in v1, value-weighted in v2) | `llm_inference` + `tool_call` where `provider IS NOT NULL` |
 | `authenticity_ratio` | 0.25 | `1 - (authentic events / total events)` — low authenticity = risk | All events |
-| `activity_continuity` | 0.20 | `1 - (active 1-min buckets / total buckets)` — gaps = risk | All events |
+| `activity_continuity` | 0.20 | `1 - (active 1-min buckets / total buckets)` — gaps = risk. Computed from `metric_rollups_1m`: count buckets with `event_count > 0` in the window. | All events |
 
 Weights versioned in `APRI_WEIGHTS` constant. Each dimension outputs [0, 10000]. Final APRI = weighted sum.
 
@@ -295,14 +298,16 @@ Each Redpanda message on the `INDEX_UPDATES` topic is a JSON object:
   "freshness_ms": 12000,
   "staleness_risk": "low",
   "revision_status": "preliminary",
+  "methodology_version": 1,
   "signer_set_id": "ss_lucid_v1",
   "signatures_json": "[{\"signer\":\"ab12...\",\"sig\":\"cd34...\"}]",
   "input_manifest_hash": "abc123...",
-  "computation_hash": "def456..."
+  "computation_hash": "def456...",
+  "source_coverage": "[\"lucid_gateway\"]"
 }
 ```
 
-Message key: `feed_id` (ensures ordering per feed).
+Message key: `feed_id` (ensures ordering per feed). Topic string literal: `INDEX_UPDATES`.
 
 ### 4.3 Redpanda INDEX_UPDATES Consumer
 
@@ -355,6 +360,7 @@ Documented in this spec header. Repeated here for clarity:
 # Worker
 POLL_INTERVAL_MS=300000          # 5 minutes (default)
 COMPUTATION_WINDOW_MS=3600000    # 1 hour rolling window (default)
+HEARTBEAT_INTERVAL_MS=900000     # 15 minutes — publish even if no deviation (default)
 WORKER_LOCK_ID=1                 # Advisory lock ID
 
 # ClickHouse Cloud (same as Plan 1, now actually used)
@@ -384,6 +390,7 @@ ORACLE_ATTESTATION_KEY=<hex-encoded-ed25519-private-key>
 | `migrations/002_worker_checkpoints.sql` | Postgres checkpoint table |
 | `migrations/003_update_feed_methodology.sql` | Updated AAI/APRI methodology seed data |
 | `apps/api/` (modified) | ClickHouse backfill, Redpanda consumer, remove direct push |
+| `packages/core/src/clients/clickhouse.ts` | Refactored `queryFeedRollup` → dimension-filtered rollup queries |
 | `packages/core/src/utils/canonical-json.ts` | Frozen v1 + golden test |
 | `packages/core/src/types/feeds.ts` | Updated V1_FEEDS descriptions |
 
