@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { V1_FEEDS, type FeedId, type PublishedFeedValue } from '@lucid/oracle-core'
+import { V1_FEEDS, CONFIDENCE_WEIGHTS, type FeedId, type PublishedFeedValue } from '@lucid/oracle-core'
 
 // In-memory store for MVP (replaced by ClickHouse in production)
 const latestFeedValues = new Map<string, PublishedFeedValue>()
@@ -47,14 +47,14 @@ export function registerOracleRoutes(app: FastifyInstance): void {
       update_interval_ms: def.update_interval_ms,
       deviation_threshold_bps: def.deviation_threshold_bps,
       confidence_formula: {
-        version: 1,
+        version: CONFIDENCE_WEIGHTS.version,
         weights: {
-          source_diversity_score: 0.25,
-          identity_confidence: 0.20,
-          data_completeness: 0.20,
-          anomaly_cleanliness: 0.15,
-          freshness_score: 0.10,
-          revision_stability: 0.10,
+          source_diversity_score: CONFIDENCE_WEIGHTS.source_diversity_score,
+          identity_confidence: CONFIDENCE_WEIGHTS.identity_confidence,
+          data_completeness: CONFIDENCE_WEIGHTS.data_completeness,
+          anomaly_cleanliness: CONFIDENCE_WEIGHTS.anomaly_cleanliness,
+          freshness_score: CONFIDENCE_WEIGHTS.freshness_score,
+          revision_stability: CONFIDENCE_WEIGHTS.revision_stability,
         },
         note: 'All inputs normalized to [0,1] where higher = more confident',
       },

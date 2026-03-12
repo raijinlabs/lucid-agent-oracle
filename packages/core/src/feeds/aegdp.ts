@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { canonicalStringify } from '../utils/canonical-json.js'
 
 /** Input data for AEGDP computation — USD values per protocol */
 export interface AEGDPInputs {
@@ -61,18 +62,6 @@ function sumValues(record: Record<string, number>): number {
 
 function hashInputs(inputs: AEGDPInputs): string {
   return createHash('sha256').update(canonicalStringify(inputs)).digest('hex')
-}
-
-/** Recursive key-sorted JSON for deterministic hashing */
-function canonicalStringify(obj: unknown): string {
-  if (obj === null || obj === undefined) return JSON.stringify(obj)
-  if (typeof obj !== 'object') return JSON.stringify(obj)
-  if (Array.isArray(obj)) return '[' + obj.map(v => canonicalStringify(v)).join(',') + ']'
-  const sorted = Object.keys(obj as Record<string, unknown>).sort()
-  const entries = sorted.map(k =>
-    JSON.stringify(k) + ':' + canonicalStringify((obj as Record<string, unknown>)[k])
-  )
-  return '{' + entries.join(',') + '}'
 }
 
 /** Hash of this computation's source code version */

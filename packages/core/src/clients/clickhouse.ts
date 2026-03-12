@@ -111,7 +111,7 @@ export class OracleClickHouse {
       query_params: { feedId },
       format: 'JSONEachRow',
     })
-    const rows = await result.json<StoredFeedValue[]>()
+    const rows = (await result.json()) as StoredFeedValue[]
     return rows[0] ?? null
   }
 

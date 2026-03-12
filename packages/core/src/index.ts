@@ -18,3 +18,6 @@ export {
 // Clients
 export { OracleClickHouse, type ClickHouseConfig, type RollupRow, type StoredFeedValue } from './clients/clickhouse.js'
 export { RedpandaProducer, RedpandaConsumer, TOPICS, type RedpandaConfig } from './clients/redpanda.js'
+
+// Utils
+export { canonicalStringify } from './utils/canonical-json.js'

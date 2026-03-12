@@ -1,5 +1,6 @@
 import { createHmac, createHash } from 'node:crypto'
 import * as ed from '@noble/ed25519'
+import { canonicalStringify } from '../utils/canonical-json.js'
 
 // @noble/ed25519 v2 requires sha512Sync to be set in Node.js environments.
 // Wire it up to Node's built-in crypto so all operations remain synchronous.
@@ -57,13 +58,9 @@ export class AttestationService {
         this.privateKey = ed.utils.randomPrivateKey()
       }
     }
-    // @noble/ed25519 v2+ is synchronous by default.
-    // The instanceof Promise checks are a safety net for unexpected versions.
+    // @noble/ed25519 v2+ with sha512Sync is always synchronous.
     const pubBytes = ed.getPublicKey(this.privateKey)
-    if (pubBytes instanceof Promise) {
-      throw new Error('ed25519 sync mode required — ensure @noble/ed25519 v2+')
-    }
-    this.publicKeyHex = bytesToHex(pubBytes as Uint8Array)
+    this.publicKeyHex = bytesToHex(pubBytes)
   }
 
   /** Sign a report payload and return the full envelope */
@@ -71,16 +68,13 @@ export class AttestationService {
     const message = this.canonicalize(payload)
     const msgBytes = new TextEncoder().encode(message)
     const sig = ed.sign(msgBytes, this.privateKey)
-    if (sig instanceof Promise) {
-      throw new Error('ed25519 sync mode required')
-    }
 
     return {
       ...payload,
       signer_set_id: 'ss_lucid_v1',
       signatures: [{
         signer: this.publicKeyHex,
-        sig: bytesToHex(sig as Uint8Array),
+        sig: bytesToHex(sig),
       }],
     }
   }
@@ -94,9 +88,6 @@ export class AttestationService {
 
     for (const { signer, sig } of signatures) {
       const valid = ed.verify(hexToBytes(sig), msgBytes, hexToBytes(signer))
-      if (valid instanceof Promise) {
-        throw new Error('ed25519 sync mode required')
-      }
       if (!valid) return false
     }
     return true
@@ -107,17 +98,8 @@ export class AttestationService {
     return this.publicKeyHex
   }
 
-  /** Deterministic JSON serialization with recursive key sorting.
-   *  TODO(plan-2): Evaluate RFC 8785 (JCS) before on-chain publication. */
   private canonicalize(obj: unknown): string {
-    if (obj === null || obj === undefined) return JSON.stringify(obj)
-    if (typeof obj !== 'object') return JSON.stringify(obj)
-    if (Array.isArray(obj)) return '[' + obj.map(v => this.canonicalize(v)).join(',') + ']'
-    const sorted = Object.keys(obj as Record<string, unknown>).sort()
-    const entries = sorted.map(k =>
-      JSON.stringify(k) + ':' + this.canonicalize((obj as Record<string, unknown>)[k])
-    )
-    return '{' + entries.join(',') + '}'
+    return canonicalStringify(obj)
   }
 }
 
