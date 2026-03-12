@@ -1,0 +1,12 @@
+{
+  "name": "@lucid/oracle-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@lucid/oracle-core": "*",
+    "@coral-xyz/anchor": "^0.30.1",
+    "@solana/web3.js": "^1.95.0",
+    "viem": "^2.21.0"
+  }
+}
