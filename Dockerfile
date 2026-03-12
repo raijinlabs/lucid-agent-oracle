@@ -4,6 +4,7 @@ COPY package.json package-lock.json ./
 COPY packages/core/package.json packages/core/
 COPY apps/api/package.json apps/api/
 COPY apps/worker/package.json apps/worker/
+COPY apps/publisher/package.json apps/publisher/
 RUN npm install
 COPY . .
 
@@ -17,3 +18,7 @@ CMD ["npx", "tsx", "apps/api/src/server.ts"]
 # Worker target
 FROM base AS worker
 CMD ["npx", "tsx", "apps/worker/src/index.ts"]
+
+# Publisher target
+FROM base AS publisher
+CMD ["npx", "tsx", "apps/publisher/src/index.ts"]
