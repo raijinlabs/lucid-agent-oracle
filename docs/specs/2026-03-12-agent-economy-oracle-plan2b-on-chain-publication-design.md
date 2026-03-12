@@ -51,6 +51,16 @@ Three deliverables:
 
 **Data flow:** Worker computes → attests → persists → publishes `PublicationRequest` → publisher consumes → posts to Solana + Base in parallel → inserts revision-row with tx hashes into `published_feed_values`.
 
+### On-Chain Value Encoding
+
+| Feed | `value` encoding | `decimals` | Example |
+|------|-----------------|-----------|---------|
+| AEGDP | USD × 10^6 | 6 | $847,000 → `847000000000` |
+| AAI | index score (0–1000) | 0 | 742 → `742` |
+| APRI | basis points (0–10000) | 0 | 3200 → `3200` |
+
+The publisher reads `value_usd` (AEGDP) or `value_index` (AAI/APRI) from the `PublicationRequest` and applies the feed-specific scaling before posting on-chain.
+
 ---
 
 ## 2. Solana Anchor Program (Slim)
@@ -358,11 +368,15 @@ Uses `viem` (or `ethers` v6). Authority EOA signs the transaction.
 When a `PublicationRequest` is consumed:
 
 1. Post to Solana and Base **in parallel** (`Promise.allSettled`)
-2. For each chain that succeeds, insert a **revision-row** into ClickHouse `published_feed_values`:
-   - Same `(feed_id, feed_version, computed_at)` as the original row
-   - `revision = original.revision + 1` (or a chain-specific revision counter)
-   - `published_solana` / `published_base` set to the tx hash
-   - ReplacingMergeTree will keep the highest-revision row after merge
+2. After both settle, insert **one revision-row** into ClickHouse `published_feed_values`:
+   - Same `(feed_id, feed_version, computed_at)` as the original row (written by worker with `revision = 0`)
+   - `revision = 1`
+   - `published_solana` = Solana tx signature (or `null` if failed)
+   - `published_base` = Base tx hash (or `null` if failed)
+   - All other fields copied from the original row
+   - ReplacingMergeTree will keep `revision = 1` over `revision = 0` after merge
+
+One row per publication attempt, not one per chain. If both chains fail, no revision-row is inserted (original `revision = 0` row remains with both fields `null`). If one chain fails, the revision-row records the successful tx hash and `null` for the failed chain; the next publication cycle posts a fresh value that supersedes it.
 
 This avoids `ALTER TABLE UPDATE` mutations entirely. The publisher only ever **inserts** — ClickHouse's ReplacingMergeTree handles dedup by keeping the row with the highest `revision` for each `(feed_id, feed_version, computed_at)` key.
 
