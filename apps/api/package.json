@@ -8,6 +8,7 @@
     "@lucid/oracle-core": "*",
     "fastify": "^5.0.0",
     "@fastify/cors": "^10.0.0",
-    "pino": "^9.0.0"
+    "pino": "^9.0.0",
+    "nanoid": "^5.0.0"
   }
 }
