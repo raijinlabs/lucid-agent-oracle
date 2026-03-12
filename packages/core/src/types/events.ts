@@ -61,7 +61,7 @@ export type EventSource =
   | 'olas_gnosis'
   | 'olas_base'
   | 'olas_optimism'
-  | 'erc8004_eth'
+  | 'erc8004'
   | 'agent_wallets_sol'
   | 'agent_wallets_evm'
   | 'cookie_api'
@@ -89,6 +89,8 @@ export type EventType =
   | 'stake'
   | 'identity_link'
   | 'reputation_update'
+  | 'transfer'
+  | 'contract_interaction'
 
 /** How the subject was identified in the source system */
 export type SubjectIdType =
