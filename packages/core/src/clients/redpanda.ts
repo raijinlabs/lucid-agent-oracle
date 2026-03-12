@@ -17,6 +17,7 @@ export const TOPICS = {
   NORMALIZED: 'normalized.economic',
   INDEX_UPDATES: 'index.updates',
   PUBLICATION: 'publication.requests',
+  WATCHLIST: 'wallet_watchlist.updated',
 } as const
 
 /**
