@@ -49,6 +49,8 @@ if (clickhouseUrl && redpandaBrokers) {
   await consumer.subscribe([TOPICS.INDEX_UPDATES])
   consumer.runRaw(async (_key, value) => {
     if (value) handleIndexUpdate(value)
+  }).catch((err) => {
+    app.log.error('INDEX_UPDATES consumer error:', err)
   })
   app.log.info('INDEX_UPDATES consumer started')
 

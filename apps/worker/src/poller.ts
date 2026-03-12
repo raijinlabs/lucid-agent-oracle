@@ -7,12 +7,19 @@ import {
 } from '@lucid/oracle-core'
 import type { Checkpoint } from './checkpoint.js'
 
+/** Allowlisted identifiers — defense-in-depth against SQL injection via checkpoint table. */
+const ALLOWED_TABLES = new Set(['receipt_events', 'mcpgate_audit_log', 'gateway_payment_sessions'])
+const ALLOWED_COLUMNS = new Set(['created_at', 'updated_at'])
+
 /** Poll a single gateway table using compound watermark. Returns new rows transformed to events. */
 export async function pollGatewayTable(
   pool: pg.Pool,
   checkpoint: Checkpoint,
 ): Promise<{ events: RawEconomicEvent[]; lastTs: Date | null; lastId: string | null }> {
   const { source_table, watermark_column, last_seen_ts, last_seen_id } = checkpoint
+
+  if (!ALLOWED_TABLES.has(source_table)) throw new Error(`Disallowed source table: ${source_table}`)
+  if (!ALLOWED_COLUMNS.has(watermark_column)) throw new Error(`Disallowed watermark column: ${watermark_column}`)
 
   const result = await pool.query(
     `SELECT * FROM ${source_table}
