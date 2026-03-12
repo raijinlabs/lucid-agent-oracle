@@ -1,7 +1,11 @@
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
-import { OracleClickHouse, RedpandaConsumer, TOPICS } from '@lucid/oracle-core'
+import { OracleClickHouse, RedpandaConsumer, RedpandaProducer, TOPICS } from '@lucid/oracle-core'
+import type { ERC8004Event, WatchlistUpdate } from '@lucid/oracle-core'
 import { registerOracleRoutes, initFeedCache, handleIndexUpdate, reconcileFeedCache } from './routes/v1.js'
+import { IdentityResolver } from './services/identity-resolver.js'
+import { WalletWatchlist } from './services/wallet-watchlist.js'
+import { registerHeliusWebhook } from './routes/helius-webhook.js'
 
 const PORT = parseInt(process.env.PORT ?? '4040', 10)
 const app = Fastify({ logger: true })
@@ -61,9 +65,81 @@ if (clickhouseUrl && redpandaBrokers) {
   app.log.warn('CLICKHOUSE_URL or REDPANDA_BROKERS not set — running in Plan 1 mode (empty cache)')
 }
 
+// Plan 4A: Identity resolver + Helius webhook
+const databaseUrl = process.env.DATABASE_URL
+const heliusSecret = process.env.HELIUS_WEBHOOK_SECRET
+
+let resolverConsumer: RedpandaConsumer | null = null
+let watchlistConsumer: RedpandaConsumer | null = null
+let resolverProducer: RedpandaProducer | null = null
+let pgClient: { end(): Promise<void> } | null = null
+
+if (databaseUrl && redpandaBrokers) {
+  const { default: pg } = await import('pg')
+  const client = new pg.Client({ connectionString: databaseUrl })
+  await client.connect()
+  pgClient = client
+
+  resolverProducer = new RedpandaProducer({
+    brokers: redpandaBrokers.split(','),
+    clientId: 'oracle-api-resolver',
+  })
+  await resolverProducer.connect()
+
+  const resolver = new IdentityResolver(client, resolverProducer)
+  const watchlist = new WalletWatchlist(client)
+  await watchlist.loadSolanaWallets()
+  await watchlist.loadBaseWallets()
+  app.log.info(`Watchlist loaded: ${watchlist.getSolanaWallets().size} Solana, ${watchlist.getBaseWallets().size} Base wallets`)
+
+  // Start ERC-8004 consumer for resolver
+  resolverConsumer = new RedpandaConsumer({
+    brokers: redpandaBrokers.split(','),
+    groupId: 'oracle-api-resolver',
+  })
+  await resolverConsumer.subscribe([TOPICS.RAW_ERC8004])
+  resolverConsumer.runRaw(async (_key, value) => {
+    if (!value) return
+    const event = JSON.parse(value) as ERC8004Event
+    await resolver.handleERC8004Event(event)
+  }).catch((err) => {
+    app.log.error('ERC-8004 resolver consumer error:', err)
+  })
+
+  // Start watchlist consumer
+  watchlistConsumer = new RedpandaConsumer({
+    brokers: redpandaBrokers.split(','),
+    groupId: 'oracle-api-watchlist',
+  })
+  await watchlistConsumer.subscribe([TOPICS.WATCHLIST])
+  watchlistConsumer.runRaw(async (_key, value) => {
+    if (!value) return
+    const update = JSON.parse(value) as WatchlistUpdate
+    watchlist.handleWatchlistUpdate(update)
+  }).catch((err) => {
+    app.log.error('Watchlist consumer error:', err)
+  })
+
+  // Register Helius webhook if secret is configured
+  if (heliusSecret) {
+    registerHeliusWebhook(app, resolverProducer, watchlist.getSolanaWallets(), heliusSecret)
+    app.log.info('Helius webhook endpoint registered')
+  }
+
+  app.log.info('Identity resolver started')
+} else if (!databaseUrl) {
+  app.log.warn('DATABASE_URL not set — identity resolver disabled')
+}
+
 // Graceful shutdown
 const shutdown = async () => {
   app.log.info('Shutting down...')
+  // Plan 4A resources
+  await resolverConsumer?.disconnect().catch(() => {})
+  await watchlistConsumer?.disconnect().catch(() => {})
+  await resolverProducer?.disconnect().catch(() => {})
+  await pgClient?.end().catch(() => {})
+  // Plan 2A resources
   await consumer?.disconnect()
   await clickhouse?.close()
   await app.close()
