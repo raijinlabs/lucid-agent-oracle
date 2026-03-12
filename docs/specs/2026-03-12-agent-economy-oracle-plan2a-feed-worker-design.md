@@ -1,0 +1,351 @@
+# Agent Economy Oracle — Plan 2A: Feed Worker Pipeline
+
+**Scope:** Feed worker orchestration, AAI/APRI feed computation, ClickHouse schema, API cache upgrade. No chain code, no MCP tools, no dashboard, no Redis.
+
+**Phase-level simplification:** For Plan 2A, Redis is deferred; the API runs as a single instance and uses an in-memory latest-value cache hydrated from ClickHouse on startup and updated via `INDEX_UPDATES`. The full Redis hot-cache layer, horizontal API scaling, and SSE fanout ship in Plan 3. This is an intentional scope reduction, not an accidental departure from the global design which specifies `Source Adapters → Redpanda → ClickHouse → Redis` as the production data path.
+
+**Builds on:** Plan 1 (Data Plane + Control Plane Foundation) — types, clients, adapters, services, AEGDP feed, REST API skeleton, control plane migration.
+
+**Architecture:** Approach C+ — poll for ingestion + compute, publish via Redpanda, persist in ClickHouse (source of truth), API subscribes to `INDEX_UPDATES` and serves from in-memory cache with ClickHouse backfill on startup.
+
+---
+
+## 1. Worker Architecture
+
+**New workspace package:** `apps/worker/` (`@lucid/oracle-worker`)
+
+Single long-running TypeScript process with a non-overlapping poll loop (setTimeout after cycle completion, not setInterval). Default interval: 5 minutes (configurable via `POLL_INTERVAL_MS`).
+
+### Poll Cycle
+
+On each tick:
+
+1. **Poll** — Query gateway Postgres tables using durable compound watermarks `(last_seen_ts, last_seen_id)` per table. Fetch rows with lexicographic `(created_at, id) > (checkpoint_ts, checkpoint_id)`. For mutable tables (`gateway_payment_sessions`), use `updated_at` as the watermark column instead of `created_at`.
+
+2. **Transform** — Run through existing `transformReceiptEvent`, `transformAuditLogEntry`, `transformPaymentSession` from `@lucid/oracle-core`.
+
+3. **Ingest** — Bulk insert `RawEconomicEvent[]` into ClickHouse `raw_economic_events`. ClickHouse incremental MVs (`metric_rollups_1m`) update automatically at insert time.
+
+4. **Advance checkpoint** — Update `oracle_worker_checkpoints` in Postgres after successful ClickHouse insert. Worker delivery is at-least-once: crashes before checkpoint advancement can cause re-delivery. This is safe because `raw_economic_events` uses deterministic `event_id` for query-time dedup when needed.
+
+5. **Compute** — Query ClickHouse rollups for the current computation window using `-Merge` aggregate functions. Run all 3 feed functions (`computeAEGDP`, `computeAAI`, `computeAPRI`). Each returns a typed result with provenance hashes.
+
+6. **Threshold check** — Compare new value against latest published value from ClickHouse `published_feed_values` for the same `feed_id`, same `feed_version`, latest non-superseded revision. Publish only if:
+   - **Heartbeat:** No publication for this feed in the last 5 minutes (proves liveness even if value unchanged)
+   - **Deviation:** Value changed by more than threshold (AEGDP: 100bps, AAI: 200bps, APRI: 500bps)
+
+7. **Attest** — Sign changed feed values via `AttestationService.signReport()`. Produces a `ReportEnvelope` with multi-signer-ready structure.
+
+8. **Persist** — Insert attested values into ClickHouse `published_feed_values` (source of truth).
+
+9. **Fanout** — Publish compact `INDEX_UPDATES` events to Redpanda for API consumption.
+
+### Single-Worker Lock
+
+Postgres advisory lock (`pg_try_advisory_lock`) held on a **dedicated `pg.Client` connection** (not the pool). If another instance is already running, the new one exits cleanly. If the dedicated lock connection drops, the worker process exits immediately (fail closed). One global worker lock for Plan 2A.
+
+### Graceful Shutdown
+
+On SIGTERM: complete in-progress cycle, release advisory lock, disconnect ClickHouse/Redpanda/Postgres clients, exit 0.
+
+---
+
+## 2. AAI and APRI Feed Computation
+
+Both feeds are pure functions in `packages/core/src/feeds/`. Deterministic, provenance-hashed, versioned methodology.
+
+**v1 Lucid-native methodology note:** Both feeds are computed from Lucid gateway telemetry only. Sub-metrics requiring identity resolution (`subject_entity_id`), cross-protocol data, or USD-value weighting upgrade to methodology v2 when those data sources ship. Code uses `subject_entity_id ?? subject_raw_id` from day one so the upgrade path is seamless.
+
+### AAI (Agent Activity Index)
+
+`computeAAI(inputs: AAIInputs): AAIResult`
+
+Dimensionless activity index [0, 1000]. Higher = more active economy. Four sub-metrics, equally weighted (0.25 each):
+
+| Sub-metric | Definition | Filter |
+|-----------|-----------|--------|
+| `active_agents` | Unique `subject_entity_id ?? subject_raw_id` with >= 1 event | `economic_authentic = true` |
+| `throughput_per_second` | (`tool_call` + `llm_inference` events) / window duration in seconds | `economic_authentic = true` |
+| `authentic_tool_call_volume` | Total `tool_call` events | `economic_authentic = true` |
+| `model_provider_diversity` | Distinct `(model_id, provider)` pairs | `economic_authentic = true` |
+
+**v1 note:** `throughput_per_second` and `authentic_tool_call_volume` overlap on tool calls, intentionally overweighting execution throughput in v1. v2 diversifies with `task_complete` events and cross-protocol tx count when those data sources are available.
+
+Normalization: log10-based with **versioned anchor constants** in `AAI_NORMALIZATION` (same pattern as `CONFIDENCE_WEIGHTS`). Each sub-metric is normalized to [0, 1000] using `min(1000, (log10(value + 1) / log10(anchor + 1)) * 1000)`. Anchors are methodology-versioned for reproducibility.
+
+Weights versioned in `AAI_WEIGHTS` constant.
+
+### APRI (Agent Protocol Risk Index)
+
+`computeAPRI(inputs: APRIInputs): APRIResult`
+
+Risk score [0, 10000] basis points. **Higher = more risk.** Four weighted dimensions:
+
+| Dimension | Weight | Definition | Scope |
+|----------|--------|-----------|-------|
+| `error_rate` | 0.30 | Fraction with `status = 'error'` | `llm_inference` + `tool_call` only |
+| `provider_concentration` | 0.25 | HHI across `provider` values (event-count in v1, value-weighted in v2) | `llm_inference` + `tool_call` where `provider IS NOT NULL` |
+| `authenticity_ratio` | 0.25 | `1 - (authentic events / total events)` — low authenticity = risk | All events |
+| `activity_continuity` | 0.20 | `1 - (active 1-min buckets / total buckets)` — gaps = risk | All events |
+
+Weights versioned in `APRI_WEIGHTS` constant. Each dimension outputs [0, 10000]. Final APRI = weighted sum.
+
+Both functions return `input_manifest_hash` + `computation_hash` for provenance, following the same pattern as `computeAEGDP`.
+
+---
+
+## 3. ClickHouse Schema
+
+ClickHouse DDL in `migrations/clickhouse/` (applied via startup script or manual step — ClickHouse Cloud does not support traditional migration tooling).
+
+### 3.1 `raw_economic_events` — MergeTree
+
+Append-only event store. Plain `MergeTree` (not Replacing — corrections are new rows with `corrects_event_id`, originals are never mutated).
+
+```sql
+CREATE TABLE raw_economic_events (
+  event_id            String,
+  source              LowCardinality(String),
+  source_adapter_ver  UInt16,
+  ingestion_type      LowCardinality(String),
+  ingestion_ts        DateTime64(3),
+  chain               LowCardinality(String),
+  block_number        Nullable(UInt64),
+  tx_hash             Nullable(String),
+  log_index           Nullable(UInt32),
+  event_type          LowCardinality(String),
+  event_timestamp     DateTime64(3),
+  subject_entity_id   Nullable(String),
+  subject_raw_id      Nullable(String),
+  subject_id_type     LowCardinality(Nullable(String)),
+  counterparty_raw_id Nullable(String),
+  protocol            LowCardinality(String),
+  amount              Nullable(String),
+  currency            Nullable(String),
+  usd_value           Nullable(Float64),
+  tool_name           Nullable(String),
+  model_id            Nullable(String),
+  provider            Nullable(String),
+  duration_ms         Nullable(UInt32),
+  status              LowCardinality(String),
+  quality_score       Float32,
+  economic_authentic  UInt8,
+  corrects_event_id   Nullable(String),
+  correction_reason   Nullable(String)
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(event_timestamp)
+ORDER BY (event_id, ingestion_ts);
+```
+
+Idempotency: at-least-once delivery via checkpoint discipline. Deterministic `event_id` enables query-time dedup via `argMax`/grouping when needed.
+
+### 3.2 `metric_rollups_1m` — AggregatingMergeTree
+
+Incremental MV target with proper aggregate function types for merge-correct behavior across insert blocks:
+
+```sql
+CREATE TABLE metric_rollups_1m (
+  bucket              DateTime,
+  source              LowCardinality(String),
+  protocol            LowCardinality(String),
+  chain               LowCardinality(String),
+  event_type          LowCardinality(String),
+  event_count         SimpleAggregateFunction(sum, UInt64),
+  authentic_count     SimpleAggregateFunction(sum, UInt64),
+  total_usd_value     SimpleAggregateFunction(sum, Float64),
+  success_count       SimpleAggregateFunction(sum, UInt64),
+  error_count         SimpleAggregateFunction(sum, UInt64),
+  distinct_subjects   AggregateFunction(uniq, String),
+  distinct_providers  AggregateFunction(uniq, String),
+  distinct_model_provider_pairs AggregateFunction(uniq, Tuple(String, String))
+) ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(bucket)
+ORDER BY (bucket, source, protocol, chain, event_type);
+```
+
+Materialized view using `-State` aggregate functions:
+
+```sql
+CREATE MATERIALIZED VIEW metric_rollups_1m_mv TO metric_rollups_1m AS
+SELECT
+  toStartOfMinute(event_timestamp) AS bucket,
+  source, protocol, chain, event_type,
+  toUInt64(count()) AS event_count,
+  toUInt64(countIf(economic_authentic = 1)) AS authentic_count,
+  sumIf(usd_value, usd_value IS NOT NULL) AS total_usd_value,
+  toUInt64(countIf(status = 'success')) AS success_count,
+  toUInt64(countIf(status = 'error')) AS error_count,
+  uniqState(coalesce(subject_entity_id, subject_raw_id, '')) AS distinct_subjects,
+  uniqState(coalesce(provider, '')) AS distinct_providers,
+  uniqState(tuple(coalesce(model_id, ''), coalesce(provider, '')))
+    AS distinct_model_provider_pairs
+FROM raw_economic_events
+WHERE corrects_event_id IS NULL
+GROUP BY bucket, source, protocol, chain, event_type;
+```
+
+Queries use `-Merge` functions:
+
+```sql
+SELECT
+  bucket,
+  sum(event_count) AS total_events,
+  uniqMerge(distinct_subjects) AS unique_agents,
+  uniqMerge(distinct_providers) AS unique_providers
+FROM metric_rollups_1m
+WHERE bucket >= {from:DateTime} AND bucket < {to:DateTime}
+GROUP BY bucket
+ORDER BY bucket;
+```
+
+### 3.3 `published_feed_values` — ReplacingMergeTree
+
+Source of truth for attested feed values. Richer schema matching the canonical design model:
+
+```sql
+CREATE TABLE published_feed_values (
+  feed_id             LowCardinality(String),
+  feed_version        UInt16,
+  computed_at         DateTime64(3),
+  revision            UInt16 DEFAULT 0,
+  value_json          String,
+  value_usd           Nullable(Float64),
+  value_index         Nullable(Float64),
+  confidence          Float32,
+  completeness        Float32,
+  freshness_ms        UInt32,
+  staleness_risk      LowCardinality(String),
+  methodology_version UInt16,
+  input_manifest_hash String,
+  computation_hash    String,
+  signer_set_id       String,
+  signatures_json     String,
+  source_coverage     String,
+  published_solana    Nullable(String),
+  published_base      Nullable(String)
+) ENGINE = ReplacingMergeTree(revision)
+ORDER BY (feed_id, feed_version, computed_at);
+```
+
+`revision` is the version column for `ReplacingMergeTree` — rows with the same `(feed_id, feed_version, computed_at)` are deduplicated, keeping the highest `revision`. Chain publication columns (`published_solana`, `published_base`) are unused in Plan 2A, populated in Plan 2B.
+
+### 3.4 Postgres Migration `002_worker_checkpoints.sql`
+
+```sql
+CREATE TABLE IF NOT EXISTS oracle_worker_checkpoints (
+  source_table     TEXT PRIMARY KEY,
+  watermark_column TEXT NOT NULL DEFAULT 'created_at',
+  last_seen_ts     TIMESTAMPTZ NOT NULL,
+  last_seen_id     TEXT NOT NULL,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+---
+
+## 4. API Changes
+
+The API server (`apps/api/`) upgrades from Plan 1's direct-push model to a worker-driven cache with ClickHouse backing.
+
+**Plan 2A constraint:** Single API instance only. Horizontal scaling requires shared cache (Redis, Plan 3).
+
+### 4.1 Startup Sequence
+
+```
+1. Connect to ClickHouse (via OracleClickHouse from @lucid/oracle-core)
+2. Connect Redpanda consumer (via RedpandaConsumer from @lucid/oracle-core)
+   — subscribe to INDEX_UPDATES topic
+   — consumer group: unique per instance (e.g., oracle-api-{hostname})
+3. Backfill: query published_feed_values for the latest effective row
+   per feed_id for the active feed_version (accounting for replacement
+   semantics / latest non-superseded revision)
+4. Start consumer message processing → updates in-memory Map
+5. Reconciliation read from ClickHouse (closes race between steps 3-4)
+6. Start Fastify listening on :4040
+```
+
+### 4.2 Redpanda INDEX_UPDATES Consumer
+
+Background consumer running alongside Fastify in the same process. On each message: parse compact feed update, call internal `updateFeedValue()` to update the in-memory Map. On SIGTERM: consumer and server shut down gracefully together.
+
+### 4.3 Remove External Push Interface
+
+`updateFeedValue()` becomes an internal function (called by the consumer handler). No longer exported from `v1.ts`. `_resetFeedValues()` stays for tests.
+
+### 4.4 No New Endpoints
+
+Same feeds/protocols/reports/methodology surface as Plan 1. The difference: backed by real computed data from the worker pipeline instead of an empty Map.
+
+---
+
+## 5. Housekeeping
+
+### 5.1 Freeze Canonical JSON v1
+
+The `HARD GATE` in `canonical-json.ts` is satisfied: we freeze the current recursive key-sorted JSON as **v1**.
+
+- Update comment: `@frozen v1 — do not modify without signer_set_id version bump`
+- Add a golden test that pins exact output for a known input
+- Document the format in methodology endpoint response
+- RFC 8785 (JCS) evaluation deferred — current format is correct and deterministic
+
+### 5.2 Spec Sync — Update Stale Feed Descriptions
+
+Plan 1 artifacts still reference old AAI/APRI formulas that were revised during Plan 2A design:
+
+- `packages/core/src/types/feeds.ts` — Update `V1_FEEDS` descriptions for AAI and APRI
+- `migrations/001_control_plane.sql` — Stale seed `methodology_json`. Add new migration `003_update_feed_methodology.sql` with updated methodology for AAI/APRI
+- `apps/api/src/routes/v1.ts` — Extend methodology endpoint to return feed-specific computation details (weights, sub-metrics, normalization anchors) not just the generic confidence formula
+
+### 5.3 Plan 2A Scope Exception
+
+Documented in this spec header. Repeated here for clarity:
+
+> For Plan 2A, Redis is deferred; the API runs as a single instance and uses an in-memory latest-value cache hydrated from ClickHouse on startup and updated via `INDEX_UPDATES`. The full Redis hot-cache layer, horizontal API scaling, and SSE fanout ship in Plan 3.
+
+---
+
+## Environment Variables (New in Plan 2A)
+
+```bash
+# Worker
+POLL_INTERVAL_MS=300000          # 5 minutes (default)
+WORKER_LOCK_ID=1                 # Advisory lock ID
+
+# ClickHouse Cloud (same as Plan 1, now actually used)
+CLICKHOUSE_URL=https://your-instance.clickhouse.cloud:8443
+CLICKHOUSE_PASSWORD=...
+
+# Redpanda (same as Plan 1, now actually used)
+REDPANDA_BROKERS=localhost:9092
+
+# Gateway Postgres (read-only, same Supabase instance)
+DATABASE_URL=postgresql://...
+
+# Attestation (same as Plan 1)
+ORACLE_ATTESTATION_KEY=<hex-encoded-ed25519-private-key>
+```
+
+---
+
+## What Ships
+
+| Component | Deliverable |
+|-----------|-------------|
+| `apps/worker/` | Poll loop, watermark checkpoints, advisory lock, threshold + heartbeat, ClickHouse ingest, Redpanda fanout |
+| `packages/core/src/feeds/aai.ts` | `computeAAI` pure function with versioned weights and normalization |
+| `packages/core/src/feeds/apri.ts` | `computeAPRI` pure function with versioned weights |
+| `migrations/clickhouse/` | DDL for raw_economic_events, metric_rollups_1m + MV, published_feed_values |
+| `migrations/002_worker_checkpoints.sql` | Postgres checkpoint table |
+| `migrations/003_update_feed_methodology.sql` | Updated AAI/APRI methodology seed data |
+| `apps/api/` (modified) | ClickHouse backfill, Redpanda consumer, remove direct push |
+| `packages/core/src/utils/canonical-json.ts` | Frozen v1 + golden test |
+| `packages/core/src/types/feeds.ts` | Updated V1_FEEDS descriptions |
+
+## What Does NOT Ship
+
+| Deferred to | Item |
+|-------------|------|
+| Plan 2B | Solana program, Base contract, on-chain publication |
+| Plan 3 | Redis hot cache, SSE fanout, MCP tools, dashboard, auth middleware, tiering |
+| Plan 4 | External adapters (Virtuals, Olas, ERC-8004), identity resolution |
