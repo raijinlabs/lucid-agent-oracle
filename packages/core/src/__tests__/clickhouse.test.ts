@@ -1,30 +1,40 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { OracleClickHouse } from '../clients/clickhouse.js'
 
+// Shared mock function refs — declared before vi.mock so they are accessible in tests
+const mockQuery = vi.fn()
+const mockInsert = vi.fn()
+const mockPing = vi.fn().mockResolvedValue({ success: true })
+const mockClose = vi.fn()
+
 // Mock @clickhouse/client
 vi.mock('@clickhouse/client', () => ({
   createClient: vi.fn(() => ({
-    query: vi.fn(),
-    insert: vi.fn(),
-    ping: vi.fn().mockResolvedValue({ success: true }),
-    close: vi.fn(),
+    query: mockQuery,
+    insert: mockInsert,
+    ping: mockPing,
+    close: mockClose,
   })),
 }))
 
 describe('OracleClickHouse', () => {
-  let client: OracleClickHouse
+  let ch: OracleClickHouse
 
   beforeEach(() => {
     vi.clearAllMocks()
-    client = new OracleClickHouse({ url: 'http://localhost:8123' })
+    // Re-apply default mock for ping after clearAllMocks
+    mockPing.mockResolvedValue({ success: true })
+    // Default query mock returns empty result set
+    mockQuery.mockResolvedValue({ json: async () => [] })
+    ch = new OracleClickHouse({ url: 'http://localhost:8123' })
   })
 
   it('constructs with config', () => {
-    expect(client).toBeDefined()
+    expect(ch).toBeDefined()
   })
 
   it('health check calls ping', async () => {
-    const result = await client.healthCheck()
+    const result = await ch.healthCheck()
     expect(result).toBe(true)
   })
 
@@ -61,11 +71,40 @@ describe('OracleClickHouse', () => {
         correction_reason: null,
       },
     ]
-    await client.insertEvents(events as any)
-    const { createClient } = await import('@clickhouse/client')
-    const mockInstance = (createClient as any).mock.results[0].value
-    expect(mockInstance.insert).toHaveBeenCalledWith(
+    await ch.insertEvents(events as any)
+    expect(mockInsert).toHaveBeenCalledWith(
       expect.objectContaining({ table: 'raw_economic_events' })
     )
+  })
+
+  describe('queryWindowAggregates', () => {
+    it('calls query with correct SQL and DateTime-formatted params', async () => {
+      const from = new Date('2026-03-12T00:00:00Z')
+      const to = new Date('2026-03-12T01:00:00Z')
+      await ch.queryWindowAggregates(from, to)
+      expect(mockQuery).toHaveBeenCalledWith(expect.objectContaining({
+        query_params: expect.objectContaining({
+          from: '2026-03-12 00:00:00',
+          to: '2026-03-12 01:00:00',
+        }),
+      }))
+    })
+
+    it('includes uniqMerge for unique_providers', async () => {
+      const from = new Date('2026-03-12T00:00:00Z')
+      const to = new Date('2026-03-12T01:00:00Z')
+      await ch.queryWindowAggregates(from, to)
+      const call = mockQuery.mock.calls[0][0]
+      expect(call.query).toContain('uniqMerge(distinct_providers)')
+    })
+  })
+
+  describe('queryLatestPublishedValue', () => {
+    it('uses FINAL and revision_status filter', async () => {
+      await ch.queryLatestPublishedValue('aegdp', 1)
+      const call = mockQuery.mock.calls[0][0]
+      expect(call.query).toContain('FINAL')
+      expect(call.query).toContain("revision_status != 'superseded'")
+    })
   })
 })

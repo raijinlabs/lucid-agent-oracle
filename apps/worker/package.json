@@ -1,0 +1,10 @@
+{
+  "name": "@lucid/oracle-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@lucid/oracle-core": "*",
+    "pg": "^8.13.0"
+  }
+}

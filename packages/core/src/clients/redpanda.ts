@@ -55,6 +55,15 @@ export class RedpandaProducer {
     })
   }
 
+  /** Publish a generic JSON message (for INDEX_UPDATES fanout). */
+  async publishJson(topic: string, key: string, value: unknown): Promise<void> {
+    if (!this.producer) throw new Error('Producer not connected')
+    await this.producer.send({
+      topic,
+      messages: [{ key, value: JSON.stringify(value) }],
+    })
+  }
+
   /** Disconnect the producer */
   async disconnect(): Promise<void> {
     await this.producer?.disconnect()
@@ -95,6 +104,19 @@ export class RedpandaConsumer {
         if (!message.value) return
         const event = JSON.parse(message.value.toString()) as RawEconomicEvent
         await handler(event, { topic, partition, offset: message.offset })
+      },
+    })
+  }
+
+  /** Run consumer with raw string messages (for INDEX_UPDATES — not RawEconomicEvent). */
+  async runRaw(handler: (key: string | null, value: string | null) => Promise<void>): Promise<void> {
+    if (!this.consumer) throw new Error('Consumer not initialized')
+    await this.consumer.run({
+      eachMessage: async ({ message }) => {
+        await handler(
+          message.key?.toString() ?? null,
+          message.value?.toString() ?? null,
+        )
       },
     })
   }

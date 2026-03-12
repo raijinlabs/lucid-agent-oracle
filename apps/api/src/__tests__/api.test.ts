@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import Fastify from 'fastify'
-import { registerOracleRoutes, _resetFeedValues } from '../routes/v1.js'
+import { registerOracleRoutes, _resetFeedValues, handleIndexUpdate } from '../routes/v1.js'
 
 describe('Oracle Economy API', () => {
   const app = Fastify()
@@ -59,17 +59,30 @@ describe('Oracle Economy API', () => {
     expect(body.report).toBeNull()
   })
 
-  it('GET /v1/oracle/reports/latest returns data after updateFeedValue', async () => {
-    const { updateFeedValue } = await import('../routes/v1.js')
-    updateFeedValue('aegdp', {
+  it('GET /v1/oracle/reports/latest returns data after handleIndexUpdate', async () => {
+    const msg = JSON.stringify({
       feed_id: 'aegdp',
-      value: '12345.67',
+      feed_version: 1,
+      computed_at: '2026-03-12T00:00:00.000Z',
+      revision: 0,
+      value_json: '{"value_usd":12345.67}',
+      value_usd: 12345.67,
+      value_index: null,
       confidence: 0.85,
       completeness: 0.9,
       freshness_ms: 5000,
       staleness_risk: 'low',
-      computed_at: '2026-03-12T00:00:00Z',
-    } as any)
+      revision_status: 'preliminary',
+      methodology_version: 1,
+      input_manifest_hash: 'abc',
+      computation_hash: 'def',
+      signer_set_id: 'test-signer',
+      signatures_json: '[{"signer":"test-signer","sig":"sig123"}]',
+      source_coverage: '["lucid_gateway"]',
+      published_solana: null,
+      published_base: null,
+    })
+    handleIndexUpdate(msg)
 
     const res = await app.inject({ method: 'GET', url: '/v1/oracle/reports/latest' })
     expect(res.statusCode).toBe(200)
@@ -78,10 +91,25 @@ describe('Oracle Economy API', () => {
     expect(body.report.feeds).toHaveLength(1)
     expect(body.report.feeds[0].feed_id).toBe('aegdp')
 
-    // Also verify GET /v1/oracle/feeds/aegdp returns the value
+    // Verify backward-compatible response shape
     const feedRes = await app.inject({ method: 'GET', url: '/v1/oracle/feeds/aegdp' })
     const feedBody = feedRes.json()
     expect(feedBody.latest).not.toBeNull()
-    expect(feedBody.latest.value).toBe('12345.67')
+    expect(feedBody.latest.value).toBe('{"value_usd":12345.67}')
+    expect(feedBody.latest.signer).toBe('test-signer')
+  })
+
+  it('handleIndexUpdate ignores malformed messages', () => {
+    handleIndexUpdate('not json')
+    handleIndexUpdate('{}') // missing feed_id — should not crash
+  })
+
+  it('GET /v1/oracle/feeds/aai/methodology returns computation details', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/oracle/feeds/aai/methodology' })
+    expect(res.statusCode).toBe(200)
+    const body = JSON.parse(res.payload)
+    expect(body.computation.type).toBe('activity_index')
+    expect(body.computation.weights.active_agents).toBe(0.25)
+    expect(body.canonical_json_version).toBe('v1')
   })
 })

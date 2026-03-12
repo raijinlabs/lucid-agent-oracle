@@ -7,6 +7,8 @@ export { AttestationService, type ReportPayload, type ReportEnvelope } from './s
 
 // Feeds
 export { computeAEGDP, type AEGDPInputs, type AEGDPResult } from './feeds/aegdp.js'
+export { computeAAI, AAI_WEIGHTS, AAI_NORMALIZATION, type AAIInputs, type AAIResult } from './feeds/aai.js'
+export { computeAPRI, APRI_WEIGHTS, type APRIInputs, type APRIResult } from './feeds/apri.js'
 
 // Adapters
 export {
@@ -16,7 +18,14 @@ export {
 } from './adapters/gateway-tap.js'
 
 // Clients
-export { OracleClickHouse, type ClickHouseConfig, type RollupRow, type StoredFeedValue } from './clients/clickhouse.js'
+export {
+  OracleClickHouse,
+  type ClickHouseConfig,
+  type WindowAggregates,
+  type ProtocolUsdRow,
+  type ProviderCountRow,
+  type PublishedFeedRow,
+} from './clients/clickhouse.js'
 export { RedpandaProducer, RedpandaConsumer, TOPICS, type RedpandaConfig } from './clients/redpanda.js'
 
 // Utils
