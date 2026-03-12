@@ -197,10 +197,11 @@ CREATE TABLE wallet_mappings (
   confidence    REAL DEFAULT 1.0,        -- 1.0 for deterministic (Plan 4A), <1.0 for heuristic (future)
   evidence_hash TEXT,                    -- SHA-256 of proof
   created_at    TIMESTAMPTZ DEFAULT now(),
-  removed_at    TIMESTAMPTZ,             -- soft-delete for ownership transfers (NULL = active)
-  UNIQUE (chain, address)               -- one wallet → one agent entity (active only)
+  removed_at    TIMESTAMPTZ              -- soft-delete for ownership transfers (NULL = active)
 );
 
+CREATE UNIQUE INDEX wallet_mappings_active_address
+  ON wallet_mappings(chain, address) WHERE removed_at IS NULL;
 CREATE INDEX idx_wallet_mappings_entity ON wallet_mappings(agent_entity);
 ```
 
@@ -346,7 +347,7 @@ The following updates to the parent design spec are required to align with Plan 
 
 3. **Feed methodology note**: Add a note to the feed definitions section stating that AAI/APRI methodology v2 will be required when cross-protocol economic data begins flowing.
 
-4. **Redpanda topic table**: Add `wallet_watchlist.updated` (1 partition, 1 day retention, consumers: identity-resolver, wallet-watchlist service).
+4. **Redpanda topic table**: Add `wallet_watchlist.updated` (1 partition, 1 day retention, consumers: Ponder wallet handler, Helius watchlist manager).
 
 ---
 
