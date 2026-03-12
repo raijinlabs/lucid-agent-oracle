@@ -8,6 +8,14 @@
 
 **Architecture:** Approach C+ — poll for ingestion + compute, publish via Redpanda, persist in ClickHouse (source of truth), API subscribes to `INDEX_UPDATES` and serves from in-memory cache with ClickHouse backfill on startup.
 
+**Global spec deviations (intentional):**
+- `event_id`: `String` not `UUID` — `computeEventId` produces a SHA-256 hash truncated to UUID format, not a true RFC 4122 UUID. `String` is more accurate.
+- `amount`: `String` not `Decimal128(18)` — stored as string for precision safety, matching the TypeScript type. AEGDP computes from `usd_value`, not `amount`.
+- `published_solana`/`published_base`: collapsed from `(Bool + tx_hash)` to `Nullable(String)` — null = not published, non-null = tx hash. Simpler for Plan 2A.
+- `ORDER BY` keys: optimized for Plan 2A query patterns, not identical to global spec. Documented per table.
+
+**Computation window:** All feed computations use a **rolling 1-hour window** (`COMPUTATION_WINDOW_MS`, default 3,600,000ms). The worker queries rollups from `(now - window)` to `now`. This provides enough data density for meaningful metrics while keeping query scope bounded.
+
 ---
 
 ## 1. Worker Architecture
@@ -20,7 +28,7 @@ Single long-running TypeScript process with a non-overlapping poll loop (setTime
 
 On each tick:
 
-1. **Poll** — Query gateway Postgres tables using durable compound watermarks `(last_seen_ts, last_seen_id)` per table. Fetch rows with lexicographic `(created_at, id) > (checkpoint_ts, checkpoint_id)`. For mutable tables (`gateway_payment_sessions`), use `updated_at` as the watermark column instead of `created_at`.
+1. **Poll** — Query gateway Postgres tables using durable compound watermarks `(last_seen_ts, last_seen_id)` per table. Fetch rows with lexicographic `(created_at, id) > (checkpoint_ts, checkpoint_id)`. For mutable tables (`gateway_payment_sessions`), use `updated_at` as the watermark column instead of `created_at`. When a payment session is re-fetched due to an `updated_at` change, the worker produces a **new event with a new `event_id`** (deterministic from the current row state). The previous event for the same session remains in ClickHouse as historical record. This is consistent with the append-only correction model — future plans can link these via `corrects_event_id` when settlement data is available.
 
 2. **Transform** — Run through existing `transformReceiptEvent`, `transformAuditLogEntry`, `transformPaymentSession` from `@lucid/oracle-core`.
 
@@ -28,7 +36,7 @@ On each tick:
 
 4. **Advance checkpoint** — Update `oracle_worker_checkpoints` in Postgres after successful ClickHouse insert. Worker delivery is at-least-once: crashes before checkpoint advancement can cause re-delivery. This is safe because `raw_economic_events` uses deterministic `event_id` for query-time dedup when needed.
 
-5. **Compute** — Query ClickHouse rollups for the current computation window using `-Merge` aggregate functions. Run all 3 feed functions (`computeAEGDP`, `computeAAI`, `computeAPRI`). Each returns a typed result with provenance hashes.
+5. **Compute** — Query ClickHouse rollups for the current computation window (`now - COMPUTATION_WINDOW_MS` to `now`) using `-Merge` aggregate functions. Run all 3 feed functions (`computeAEGDP`, `computeAAI`, `computeAPRI`). Each returns a typed result with provenance hashes. **Note:** APRI's `provider_concentration` (HHI) requires per-provider event counts, which the rollup's `uniq` aggregate does not provide. The worker queries `raw_economic_events` directly for HHI computation, while using rollups for all other metrics. This is an acceptable trade-off for Plan 2A; a dedicated per-provider count rollup can be added in v2 if query cost becomes an issue.
 
 6. **Threshold check** — Compare new value against latest published value from ClickHouse `published_feed_values` for the same `feed_id`, same `feed_version`, latest non-superseded revision. Publish only if:
    - **Heartbeat:** No publication for this feed in the last 5 minutes (proves liveness even if value unchanged)
@@ -116,13 +124,13 @@ CREATE TABLE raw_economic_events (
   event_type          LowCardinality(String),
   event_timestamp     DateTime64(3),
   subject_entity_id   Nullable(String),
-  subject_raw_id      Nullable(String),
-  subject_id_type     LowCardinality(Nullable(String)),
+  subject_raw_id      String,
+  subject_id_type     LowCardinality(String),
   counterparty_raw_id Nullable(String),
   protocol            LowCardinality(String),
   amount              Nullable(String),
   currency            Nullable(String),
-  usd_value           Nullable(Float64),
+  usd_value           Nullable(Decimal64(6)),
   tool_name           Nullable(String),
   model_id            Nullable(String),
   provider            Nullable(String),
@@ -134,10 +142,10 @@ CREATE TABLE raw_economic_events (
   correction_reason   Nullable(String)
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(event_timestamp)
-ORDER BY (event_id, ingestion_ts);
+ORDER BY (source, chain, event_type, event_timestamp, event_id);
 ```
 
-Idempotency: at-least-once delivery via checkpoint discipline. Deterministic `event_id` enables query-time dedup via `argMax`/grouping when needed.
+ORDER BY optimized for analytical queries that filter by `source`/`chain`/`event_type` and scan by time — matching the MV GROUP BY pattern. Idempotency: at-least-once delivery via checkpoint discipline. Deterministic `event_id` enables query-time dedup via `argMax`/grouping when needed.
 
 ### 3.2 `metric_rollups_1m` — AggregatingMergeTree
 
@@ -152,7 +160,7 @@ CREATE TABLE metric_rollups_1m (
   event_type          LowCardinality(String),
   event_count         SimpleAggregateFunction(sum, UInt64),
   authentic_count     SimpleAggregateFunction(sum, UInt64),
-  total_usd_value     SimpleAggregateFunction(sum, Float64),
+  total_usd_value     SimpleAggregateFunction(sum, Decimal64(6)),
   success_count       SimpleAggregateFunction(sum, UInt64),
   error_count         SimpleAggregateFunction(sum, UInt64),
   distinct_subjects   AggregateFunction(uniq, String),
@@ -215,6 +223,7 @@ CREATE TABLE published_feed_values (
   completeness        Float32,
   freshness_ms        UInt32,
   staleness_risk      LowCardinality(String),
+  revision_status     LowCardinality(String) DEFAULT 'preliminary',
   methodology_version UInt16,
   input_manifest_hash String,
   computation_hash    String,
@@ -256,23 +265,54 @@ The API server (`apps/api/`) upgrades from Plan 1's direct-push model to a worke
 2. Connect Redpanda consumer (via RedpandaConsumer from @lucid/oracle-core)
    — subscribe to INDEX_UPDATES topic
    — consumer group: unique per instance (e.g., oracle-api-{hostname})
-3. Backfill: query published_feed_values for the latest effective row
-   per feed_id for the active feed_version (accounting for replacement
-   semantics / latest non-superseded revision)
+3. Backfill: for each feed_id in V1_FEEDS, query published_feed_values:
+     SELECT * FROM published_feed_values FINAL
+     WHERE feed_id = {id} AND feed_version = {V1_FEEDS[id].version}
+     ORDER BY computed_at DESC LIMIT 1
+   Populate latestFeedValues Map with the result.
 4. Start consumer message processing → updates in-memory Map
-5. Reconciliation read from ClickHouse (closes race between steps 3-4)
+5. Reconciliation: re-query ClickHouse for any feed_id where the
+   published_feed_values row is newer than what's in the Map
+   (closes the race window between steps 3 and 4)
 6. Start Fastify listening on :4040
 ```
 
-### 4.2 Redpanda INDEX_UPDATES Consumer
+### 4.2 INDEX_UPDATES Message Schema
 
-Background consumer running alongside Fastify in the same process. On each message: parse compact feed update, call internal `updateFeedValue()` to update the in-memory Map. On SIGTERM: consumer and server shut down gracefully together.
+Each Redpanda message on the `INDEX_UPDATES` topic is a JSON object:
 
-### 4.3 Remove External Push Interface
+```json
+{
+  "feed_id": "aegdp",
+  "feed_version": 1,
+  "computed_at": "2026-03-12T12:00:00.000Z",
+  "revision": 0,
+  "value_json": "{\"value_usd\":847000,\"breakdown\":{...}}",
+  "value_usd": 847000.00,
+  "value_index": null,
+  "confidence": 0.92,
+  "completeness": 0.85,
+  "freshness_ms": 12000,
+  "staleness_risk": "low",
+  "revision_status": "preliminary",
+  "signer_set_id": "ss_lucid_v1",
+  "signatures_json": "[{\"signer\":\"ab12...\",\"sig\":\"cd34...\"}]",
+  "input_manifest_hash": "abc123...",
+  "computation_hash": "def456..."
+}
+```
+
+Message key: `feed_id` (ensures ordering per feed).
+
+### 4.3 Redpanda INDEX_UPDATES Consumer
+
+Background consumer running alongside Fastify in the same process. On each message: parse the feed update JSON, call internal `updateFeedValue()` to update the in-memory Map. On SIGTERM: consumer and server shut down gracefully together.
+
+### 4.4 Remove External Push Interface
 
 `updateFeedValue()` becomes an internal function (called by the consumer handler). No longer exported from `v1.ts`. `_resetFeedValues()` stays for tests.
 
-### 4.4 No New Endpoints
+### 4.5 No New Endpoints
 
 Same feeds/protocols/reports/methodology surface as Plan 1. The difference: backed by real computed data from the worker pipeline instead of an empty Map.
 
@@ -289,7 +329,11 @@ The `HARD GATE` in `canonical-json.ts` is satisfied: we freeze the current recur
 - Document the format in methodology endpoint response
 - RFC 8785 (JCS) evaluation deferred — current format is correct and deterministic
 
-### 5.2 Spec Sync — Update Stale Feed Descriptions
+### 5.2 Fix Plan 1 `queryFeedRollup` Bug
+
+The Plan 1 `OracleClickHouse.queryFeedRollup()` method filters by `feed_id`, but the `metric_rollups_1m` table has no `feed_id` column — it groups by `(source, protocol, chain, event_type)`. This method must be refactored to accept rollup dimension filters instead of `feed_id`, or replaced with feed-specific query methods that the worker uses directly.
+
+### 5.3 Spec Sync — Update Stale Feed Descriptions
 
 Plan 1 artifacts still reference old AAI/APRI formulas that were revised during Plan 2A design:
 
@@ -297,7 +341,7 @@ Plan 1 artifacts still reference old AAI/APRI formulas that were revised during 
 - `migrations/001_control_plane.sql` — Stale seed `methodology_json`. Add new migration `003_update_feed_methodology.sql` with updated methodology for AAI/APRI
 - `apps/api/src/routes/v1.ts` — Extend methodology endpoint to return feed-specific computation details (weights, sub-metrics, normalization anchors) not just the generic confidence formula
 
-### 5.3 Plan 2A Scope Exception
+### 5.4 Plan 2A Scope Exception
 
 Documented in this spec header. Repeated here for clarity:
 
@@ -310,6 +354,7 @@ Documented in this spec header. Repeated here for clarity:
 ```bash
 # Worker
 POLL_INTERVAL_MS=300000          # 5 minutes (default)
+COMPUTATION_WINDOW_MS=3600000    # 1 hour rolling window (default)
 WORKER_LOCK_ID=1                 # Advisory lock ID
 
 # ClickHouse Cloud (same as Plan 1, now actually used)
