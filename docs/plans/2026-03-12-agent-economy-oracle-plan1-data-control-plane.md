@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the end-to-end data pipeline from Lucid gateway events → ClickHouse → computed feed values → REST API response.
+**Goal:** Build the foundational data and control plane: typed event model, ClickHouse/Redpanda clients, gateway adapter, AEGDP feed computation (pure function), attestation service, control plane schema, and a REST API that serves feed definitions and accepts computed values. This plan ships the building blocks; the automated feed worker pipeline that connects them end-to-end is Plan 2.
 
-**Architecture:** A standalone repo (`lucid-agent-oracle`) with `packages/core/` (library: types, clients, adapters, services, feeds) and `apps/api/` (Fastify server on :4040). Reads from the Lucid gateway's Postgres tables via `DATABASE_URL` (same Supabase instance). No code-level dependency on platform-core. By the end of this plan, you can query `GET /v1/oracle/feeds/aegdp` and get a real, attested feed value computed from Lucid's own gateway telemetry.
+**Architecture:** A standalone repo (`lucid-agent-oracle`) with `packages/core/` (library: types, clients, adapters, services, feeds) and `apps/api/` (Fastify server on :4040). Reads from the Lucid gateway's Postgres tables via `DATABASE_URL` (same Supabase instance). No code-level dependency on platform-core. By the end of this plan, all primitives exist to compute and attest feed values, but the orchestration (gateway poll → transform → compute → attest → publish) is wired in Plan 2.
 
 **Tech Stack:** ClickHouse Cloud (via `@clickhouse/client`), Redpanda (via `kafkajs`), Fastify, Vitest, Ed25519 (`@noble/ed25519`), pg (direct Postgres for gateway table reads).
 

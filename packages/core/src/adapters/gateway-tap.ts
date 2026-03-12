@@ -92,7 +92,14 @@ export function transformAuditLogEntry(entry: {
   }
 }
 
-/** Transform a gateway_payment_sessions row into a RawEconomicEvent */
+/** Transform a gateway_payment_sessions row into a RawEconomicEvent.
+ *
+ *  IMPORTANT: Payment sessions are treated as provisional economic events.
+ *  `status === 'active'` maps to success, but this does NOT imply settlement
+ *  finality. Spent proofs and settlement receipts (which provide true economic
+ *  finality) are deferred to Plan 2. Until then, all payment events should be
+ *  treated as `revision: 'preliminary'` in downstream quality envelopes.
+ *  See: docs/plans/2026-03-12-agent-economy-oracle-plan1-data-control-plane.md */
 export function transformPaymentSession(session: {
   id: string
   tenant_id: string
