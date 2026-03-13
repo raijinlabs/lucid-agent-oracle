@@ -63,7 +63,7 @@ export interface WalletMapping {
   removed_at: Date | null
 }
 
-export type WalletLinkType = 'erc8004_tba' | 'erc8004_owner' | 'lucid_passport'
+export type WalletLinkType = 'erc8004_tba' | 'erc8004_owner' | 'lucid_passport' | 'self_claim'
 
 /** Cross-protocol identity link — stored in Postgres identity_links */
 export interface IdentityLink {
@@ -74,5 +74,54 @@ export interface IdentityLink {
   link_type: string
   confidence: number
   evidence_json: string | null
+  created_at: Date
+}
+
+/** Identity evidence — stored in Postgres identity_evidence */
+export interface IdentityEvidence {
+  id: number
+  agent_entity: string
+  evidence_type: 'signed_message' | 'on_chain_proof' | 'gateway_correlation'
+  chain: string | null
+  address: string | null
+  signature: string | null
+  message: string | null
+  nonce: string | null
+  verified_at: Date
+  expires_at: Date | null
+  revoked_at: Date | null
+  metadata_json: Record<string, unknown> | null
+}
+
+/** Registration challenge — stored in Postgres registration_challenges */
+export interface RegistrationChallenge {
+  nonce: string
+  chain: string
+  address: string
+  target_entity: string | null
+  auth_chain: string | null
+  auth_address: string | null
+  message: string
+  environment: string
+  issued_at: Date
+  expires_at: Date
+  consumed_at: Date | null
+}
+
+/** Identity conflict — stored in Postgres identity_conflicts */
+export interface IdentityConflict {
+  id: number
+  chain: string
+  address: string
+  existing_entity: string
+  claiming_entity: string
+  existing_confidence: number
+  claiming_confidence: number
+  claim_evidence_id: number | null
+  status: 'open' | 'resolved' | 'dismissed'
+  resolution: 'keep_existing' | 'keep_claiming' | 'merge' | null
+  resolved_by: string | null
+  resolution_reason: string | null
+  resolved_at: Date | null
   created_at: Date
 }
