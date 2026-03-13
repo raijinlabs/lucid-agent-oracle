@@ -4,7 +4,7 @@
 
 **Goal:** Build the identity and economic substrates (ERC-8004 indexer, wallet indexers, deterministic identity resolver) that make Agents a real, cross-protocol API noun.
 
-**Architecture:** Ponder indexes Base ERC-8004 registries and wallet activity → Redpanda topics. Helius webhooks index Solana wallet activity → same pipeline. Identity resolver consumes ERC-8004 events, builds `agent_entities` / `wallet_mappings` / `identity_links` in Postgres, and emits watchlist updates. Resolver runs inside the API process as a Plan 4A simplification.
+**Architecture:** Ponder indexes Base ERC-8004 registries and wallet activity → Redpanda topics. Helius webhooks index Solana wallet activity → same pipeline. Identity resolver consumes ERC-8004 events, builds `agent_entities` / `wallet_mappings` / `identity_links` in Postgres, and emits watchlist updates. Resolver runs inside the API process as a Plan 4A simplification. All adapters are pluggable via the `AdapterRegistry` — webhook routes, identity resolution, and topic routing auto-discover from the registry at startup.
 
 **Tech Stack:** Ponder (Base indexer), Helius (Solana webhooks + Enhanced Transactions API), KafkaJS (Redpanda), Supabase (Postgres), Vitest, nanoid
 
@@ -17,14 +17,39 @@
 ### New files
 
 ```
+# Adapter framework (pluggable provider architecture)
+packages/core/src/adapters/adapter-types.ts       — AdapterDefinition, WebhookAdapter, IdentityHandler, DbClient interfaces
+packages/core/src/adapters/registry.ts             — AdapterRegistry singleton (register/get/list/withWebhook/withIdentity)
+packages/core/src/adapters/register-defaults.ts    — Boot function that registers all built-in adapters
+packages/core/src/adapters/gateway-tap-adapter.ts  — AdapterDefinition for Lucid Gateway (offchain, no webhook/identity)
+packages/core/src/adapters/erc8004-adapter.ts      — AdapterDefinition for ERC-8004 (Base, with IdentityHandler)
+packages/core/src/adapters/helius-adapter.ts       — AdapterDefinition for Helius (Solana, with WebhookAdapter)
+packages/core/src/adapters/topic-for-source.ts     — topicForSource() — resolves topic from registry with convention fallback
+packages/core/src/adapters/webhook-router.ts       — mountWebhookRoutes() — auto-mounts all registered webhook adapters
+packages/core/src/adapters/identity-dispatch.ts    — dispatchIdentityEvent() + getIdentityTopics() — registry-driven dispatch
+
+# Core types + normalizers
 packages/core/src/types/identity.ts        — ERC8004Event, WatchlistUpdate, AgentEntity types
 packages/core/src/adapters/erc8004.ts       — ERC-8004 event normalization functions
 packages/core/src/adapters/helius.ts        — Helius webhook normalization + backfill client
-packages/core/src/__tests__/erc8004.test.ts — ERC-8004 adapter tests
-packages/core/src/__tests__/helius.test.ts  — Helius adapter tests
 
+# Tests — adapter framework (38 new tests)
+packages/core/src/__tests__/registry.test.ts             — AdapterRegistry CRUD + query tests (10 tests)
+packages/core/src/__tests__/adapter-definitions.test.ts  — Built-in adapter metadata + registerDefaultAdapters (10 tests)
+packages/core/src/__tests__/topic-for-source.test.ts     — Topic resolution with fallback (2 tests)
+packages/core/src/__tests__/identity-dispatch.test.ts    — Registry-driven dispatch + getIdentityTopics (5 tests)
+packages/core/src/__tests__/webhook-router.test.ts       — Auto-mount with error handling (4 tests)
+packages/core/src/__tests__/erc8004-adapter.test.ts      — ERC-8004 identity handler integration (4 tests)
+packages/core/src/__tests__/adapter-extensibility.test.ts — E2E: add new provider, hot-swap, coexistence (3 tests)
+
+# Tests — Plan 4A normalizers
+packages/core/src/__tests__/erc8004.test.ts — ERC-8004 normalizer tests
+packages/core/src/__tests__/helius.test.ts  — Helius normalizer tests
+
+# Database
 migrations/supabase/20260312_agent_identity.sql — agent_entities, wallet_mappings, identity_links
 
+# Ponder indexer
 apps/ponder/package.json
 apps/ponder/tsconfig.json
 apps/ponder/ponder.config.ts               — Base RPC, contract addresses, ABIs
@@ -34,8 +59,9 @@ apps/ponder/src/erc8004-reputation.ts       — Reputation Registry handler
 apps/ponder/src/wallet-activity.ts          — Wallet activity handler (broad index + filter)
 apps/ponder/src/redpanda-sink.ts            — Shared Redpanda producer
 
-apps/api/src/routes/helius-webhook.ts       — POST /v1/internal/helius/webhook
-apps/api/src/services/identity-resolver.ts  — Event-driven resolver (Redpanda consumer)
+# API services (legacy — identity resolution moved to erc8004-adapter.ts)
+apps/api/src/routes/helius-webhook.ts       — POST /v1/internal/helius/webhook (legacy, now auto-mounted via registry)
+apps/api/src/services/identity-resolver.ts  — Legacy resolver (superseded by erc8004-adapter.ts IdentityHandler)
 apps/api/src/services/wallet-watchlist.ts   — Helius + Ponder watchlist management
 apps/api/src/__tests__/identity-resolver.test.ts
 apps/api/src/__tests__/helius-webhook.test.ts
@@ -45,11 +71,12 @@ apps/api/src/__tests__/wallet-watchlist.test.ts
 ### Modified files
 
 ```
-packages/core/src/types/events.ts           — Add 'erc8004' source, 'transfer'/'contract_interaction' event types
+packages/core/src/types/events.ts           — EventSource widened to KnownEventSource | (string & {}) for extensibility
 packages/core/src/types/index.ts            — Re-export identity types
-packages/core/src/index.ts                  — Export new adapters + types
+packages/core/src/index.ts                  — Export adapter framework + built-in adapters + normalizers
 packages/core/src/clients/redpanda.ts       — Add WATCHLIST topic
-apps/api/src/server.ts                      — Wire resolver + Helius webhook
+packages/core/package.json                  — Add nanoid + fastify (dev) dependencies
+apps/api/src/server.ts                      — Refactored: uses registerDefaultAdapters(), mountWebhookRoutes(), dispatchIdentityEvent()
 apps/api/package.json                       — Add nanoid dependency
 Dockerfile                                  — Add ponder target
 ```
@@ -2048,3 +2075,126 @@ git commit -m "chore: update lockfile after nanoid install"
 - **Resolver in API process**: Plan 4A simplification. All resources cleaned up via Fastify `onClose` hook. Extract to own service when API scales horizontally.
 - **All timestamps**: ISO 8601 strings in events, `Date` objects in TypeScript interfaces.
 - **Confidence**: Always 1.0 in Plan 4A. Schema supports <1.0 for future heuristic strategies.
+
+---
+
+## Chunk 5: Pluggable Adapter Architecture (Post-Implementation Refactor)
+
+> **Status:** COMPLETE — Implemented and merged to `main` on 2026-03-12.
+
+### Motivation
+
+After Chunks 1–4 were implemented, an architecture audit revealed that adding a new data source required touching 6–9 files across the codebase (adapter, types, topics, server wiring, webhook routes, identity dispatch). This was graded D for extensibility. The refactor introduces a registry-driven adapter framework where adding a new provider requires only 1–2 files.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ADAPTER REGISTRY                          │
+│  adapterRegistry.register(adapter)                           │
+│  ├── source: string        (unique key)                      │
+│  ├── topic: string         (Redpanda destination)            │
+│  ├── webhook?: WebhookAdapter  (auto-mounted route)          │
+│  └── identity?: IdentityHandler (auto-dispatched events)     │
+├─────────────────────────────────────────────────────────────┤
+│                  AUTO-WIRING AT STARTUP                       │
+│  registerDefaultAdapters()  → registers gateway, erc8004,    │
+│                               helius                         │
+│  mountWebhookRoutes(app)    → auto-mounts all webhook routes │
+│  getIdentityTopics()        → discovers topics to subscribe  │
+│  dispatchIdentityEvent()    → routes events to handlers      │
+│  topicForSource()           → resolves topic from registry   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Interfaces
+
+```typescript
+interface AdapterDefinition {
+  readonly source: string          // unique source identifier
+  readonly version: number         // adapter version for schema evolution
+  readonly description: string     // human-readable description
+  readonly topic: string           // Redpanda topic
+  readonly chains: readonly string[]
+  readonly webhook?: WebhookAdapter
+  readonly identity?: IdentityHandler
+}
+
+interface WebhookAdapter {
+  readonly path: string
+  readonly method?: 'GET' | 'POST' | 'PUT'
+  mount(app: FastifyInstance, producer: RedpandaProducer, context: WebhookContext): void
+}
+
+interface IdentityHandler {
+  readonly handles: readonly string[]
+  handleEvent(event: Record<string, unknown>, db: DbClient, producer: RedpandaProducer): Promise<void>
+}
+```
+
+### EventSource Extensibility
+
+`EventSource` was widened from a closed union to an open type:
+
+```typescript
+type KnownEventSource = 'lucid_gateway' | 'virtuals_acp' | 'olas_gnosis' | ...
+type EventSource = KnownEventSource | (string & {})  // autocomplete + custom sources
+```
+
+### Built-in Adapters
+
+| Adapter | Source | Webhook | Identity | Topic |
+|---------|--------|---------|----------|-------|
+| `gatewayTapAdapter` | `lucid_gateway` | — | — | `raw.lucid_gateway.events` |
+| `erc8004Adapter` | `erc8004` | — | ERC-8004 identity handler | `raw.erc8004.events` |
+| `heliusAdapter` | `agent_wallets_sol` | Helius HMAC webhook | — | `raw.agent_wallets.events` |
+
+### How to Add a New Provider
+
+1. Create `packages/core/src/adapters/<name>-adapter.ts`:
+
+```typescript
+import type { AdapterDefinition } from './adapter-types.js'
+
+export const myAdapter: AdapterDefinition = {
+  source: 'my_protocol',
+  version: 1,
+  description: 'My Protocol — description',
+  topic: 'raw.my_protocol.events',
+  chains: ['base'],
+  webhook: { ... },    // optional
+  identity: { ... },   // optional
+}
+```
+
+2. Register it in `packages/core/src/adapters/register-defaults.ts`:
+
+```typescript
+import { myAdapter } from './my-adapter.js'
+adapterRegistry.register(myAdapter)
+```
+
+That's it. Webhook routes auto-mount, identity dispatch auto-routes, topic resolution works.
+
+### Server.ts Refactoring
+
+The API server was refactored to use the registry:
+
+- **Before:** Manual imports of `IdentityResolver`, `registerHeliusWebhook`, hardcoded consumer subscriptions to `TOPICS.RAW_ERC8004`
+- **After:** `registerDefaultAdapters()` → `getIdentityTopics()` for auto-discovered subscriptions → `dispatchIdentityEvent()` for routing → `mountWebhookRoutes()` for auto-mounted webhooks
+
+### Test Coverage
+
+38 new tests across 7 test files:
+
+| Test File | Tests | Coverage |
+|-----------|-------|----------|
+| `registry.test.ts` | 10 | CRUD, duplicate detection, query helpers |
+| `adapter-definitions.test.ts` | 10 | Built-in adapter metadata, idempotent boot |
+| `topic-for-source.test.ts` | 2 | Registered + fallback resolution |
+| `identity-dispatch.test.ts` | 5 | Dispatch routing, unknown source, topic discovery |
+| `webhook-router.test.ts` | 4 | Mount, error handling, multiple adapters |
+| `erc8004-adapter.test.ts` | 4 | Identity handler integration per event type |
+| `adapter-extensibility.test.ts` | 3 | E2E new provider, hot-swap, coexistence |
+
+**Total test suite:** 152 tests, 34 suites, 0 failures.
