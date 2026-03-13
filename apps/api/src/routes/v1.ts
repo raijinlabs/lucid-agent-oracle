@@ -4,6 +4,7 @@ import {
   OracleClickHouse,
   type FeedId, type PublishedFeedRow,
 } from '@lucid/oracle-core'
+import { PROTOCOL_REGISTRY } from '../services/agent-query.js'
 
 // In-memory cache (replaced from Map<string, PublishedFeedValue> to Map<string, PublishedFeedRow>)
 const latestFeedValues = new Map<string, PublishedFeedRow>()
@@ -171,11 +172,10 @@ export function registerOracleRoutes(app: FastifyInstance): void {
   // ---- GET /v1/oracle/protocols ----
   app.get('/v1/oracle/protocols', async () => {
     return {
-      protocols: [
-        { id: 'lucid', name: 'Lucid', chains: ['offchain', 'base', 'solana'], status: 'active' },
-        { id: 'virtuals', name: 'Virtuals Protocol', chains: ['base'], status: 'pending' },
-        { id: 'olas', name: 'Olas / Autonolas', chains: ['gnosis', 'base', 'optimism'], status: 'pending' },
-      ],
+      protocols: Object.entries(PROTOCOL_REGISTRY).map(([id, meta]) => ({
+        id,
+        ...meta,
+      })),
     }
   })
 

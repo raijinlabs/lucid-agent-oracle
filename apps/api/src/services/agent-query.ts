@@ -129,6 +129,16 @@ export interface ProtocolMetrics {
 export class AgentQueryService {
   constructor(private readonly db: DbClient) {}
 
+  // ---- exists -------------------------------------------------------------
+
+  async exists(id: string): Promise<boolean> {
+    const { rows } = await this.db.query(
+      'SELECT 1 FROM agent_entities WHERE id = $1',
+      [id],
+    )
+    return rows.length > 0
+  }
+
   // ---- getProfile --------------------------------------------------------
 
   async getProfile(id: string): Promise<AgentProfile | null> {

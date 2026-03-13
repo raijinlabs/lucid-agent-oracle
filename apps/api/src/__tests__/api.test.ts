@@ -48,7 +48,7 @@ describe('Oracle Economy API', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/oracle/protocols' })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body.protocols.length).toBeGreaterThanOrEqual(3)
+    expect(body.protocols.length).toBeGreaterThanOrEqual(4)
     expect(body.protocols.find((p: any) => p.id === 'lucid')).toBeTruthy()
   })
 

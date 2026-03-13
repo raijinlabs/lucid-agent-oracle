@@ -13,8 +13,8 @@ export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
     const query = request.query as Record<string, string>
     const { wallet, chain, protocol, protocol_id, erc8004_id, q } = query
 
-    // At least one search param required
-    if (!wallet && !chain && !protocol && !protocol_id && !erc8004_id && !q) {
+    // At least one search param required (chain alone is not a valid search — it's a sub-filter for wallet)
+    if (!wallet && !protocol && !protocol_id && !erc8004_id && !q) {
       return reply.status(400).send({
         error: 'At least one search parameter required (wallet, chain, protocol, protocol_id, erc8004_id, q)',
       })
@@ -84,9 +84,9 @@ export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
 
     const { id } = request.params as { id: string }
 
-    // Verify entity exists before querying activity
-    const agent = await service.getProfile(id)
-    if (!agent) {
+    // Lightweight existence check instead of full profile load
+    const exists = await service.exists(id)
+    if (!exists) {
       return reply.status(404).send({ error: 'Agent not found' })
     }
 

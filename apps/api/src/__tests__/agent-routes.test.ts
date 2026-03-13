@@ -23,6 +23,11 @@ describe('Agent routes', () => {
     expect(res.statusCode).toBe(400)
   })
 
+  it('search returns 400 when only chain param given (chain alone is not a valid search)', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/oracle/agents/search?chain=base' })
+    expect(res.statusCode).toBe(400)
+  })
+
   it('search returns results for wallet param', async () => {
     // count query returns 1
     db.query.mockResolvedValueOnce({ rows: [{ cnt: 1 }] })
