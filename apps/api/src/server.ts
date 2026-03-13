@@ -12,8 +12,12 @@ import {
   adapterRegistry,
 } from '@lucid/oracle-core'
 import type { WatchlistUpdate } from '@lucid/oracle-core'
+import { verifierRegistry, evmVerifier, solanaVerifier } from '@lucid/oracle-core'
 import { registerOracleRoutes, initFeedCache, handleIndexUpdate, reconcileFeedCache } from './routes/v1.js'
 import { WalletWatchlist } from './services/wallet-watchlist.js'
+import { registerIdentityRoutes, cleanupExpiredChallenges } from './routes/identity-registration.js'
+import { registerAdminRoutes } from './routes/identity-admin.js'
+import { LucidResolver } from './services/lucid-resolver.js'
 
 const PORT = parseInt(process.env.PORT ?? '4040', 10)
 const app = Fastify({ logger: true })
@@ -76,6 +80,11 @@ if (clickhouseUrl && redpandaBrokers) {
 // Plan 4A: Registry-driven identity resolver + webhook auto-wiring
 registerDefaultAdapters()
 app.log.info(`Adapter registry: ${adapterRegistry.sources().join(', ')} (${adapterRegistry.size} adapters)`)
+
+// Plan 4B: Register signature verifiers
+verifierRegistry.register(evmVerifier)
+verifierRegistry.register(solanaVerifier)
+app.log.info(`Verifier registry: ${verifierRegistry.supportedChains().join(', ')}`)
 
 const databaseUrl = process.env.DATABASE_URL
 
@@ -142,6 +151,37 @@ if (databaseUrl && redpandaBrokers) {
   if (webhookCount > 0) {
     app.log.info(`${webhookCount} webhook route(s) auto-mounted from adapter registry`)
   }
+
+  // Plan 4B: Self-registration + admin endpoints
+  registerIdentityRoutes(app, client, resolverProducer)
+  app.log.info('Identity registration routes mounted')
+
+  const adminKey = process.env.ADMIN_KEY
+  if (adminKey) {
+    registerAdminRoutes(app, client, resolverProducer, adminKey)
+    app.log.info('Identity admin routes mounted')
+  }
+
+  // Plan 4B: Lucid-native batch resolver (runs on startup + triggered via admin)
+  const lucidResolver = new LucidResolver(client, resolverProducer)
+  lucidResolver.run().then((result) => {
+    if (result.skipped) {
+      app.log.info('Lucid resolver: skipped (another instance running)')
+    } else {
+      app.log.info(`Lucid resolver: processed=${result.processed} created=${result.created} enriched=${result.enriched} conflicts=${result.conflicts}`)
+    }
+  }).catch((err) => {
+    app.log.error('Lucid resolver startup error:', err)
+  })
+
+  // Plan 4B: Clean up expired challenges on startup + every 15 minutes
+  cleanupExpiredChallenges(client).then((count) => {
+    if (count > 0) app.log.info(`Cleaned up ${count} expired challenges`)
+  }).catch(() => {})
+
+  setInterval(() => {
+    cleanupExpiredChallenges(client).catch(() => {})
+  }, 15 * 60_000)
 
   app.log.info('Identity resolver started')
 } else if (!databaseUrl) {
