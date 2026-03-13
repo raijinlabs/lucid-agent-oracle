@@ -1,11 +1,19 @@
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
-import { OracleClickHouse, RedpandaConsumer, RedpandaProducer, TOPICS } from '@lucid/oracle-core'
-import type { ERC8004Event, WatchlistUpdate } from '@lucid/oracle-core'
+import {
+  OracleClickHouse,
+  RedpandaConsumer,
+  RedpandaProducer,
+  TOPICS,
+  registerDefaultAdapters,
+  mountWebhookRoutes,
+  dispatchIdentityEvent,
+  getIdentityTopics,
+  adapterRegistry,
+} from '@lucid/oracle-core'
+import type { WatchlistUpdate } from '@lucid/oracle-core'
 import { registerOracleRoutes, initFeedCache, handleIndexUpdate, reconcileFeedCache } from './routes/v1.js'
-import { IdentityResolver } from './services/identity-resolver.js'
 import { WalletWatchlist } from './services/wallet-watchlist.js'
-import { registerHeliusWebhook } from './routes/helius-webhook.js'
 
 const PORT = parseInt(process.env.PORT ?? '4040', 10)
 const app = Fastify({ logger: true })
@@ -65,9 +73,11 @@ if (clickhouseUrl && redpandaBrokers) {
   app.log.warn('CLICKHOUSE_URL or REDPANDA_BROKERS not set — running in Plan 1 mode (empty cache)')
 }
 
-// Plan 4A: Identity resolver + Helius webhook
+// Plan 4A: Registry-driven identity resolver + webhook auto-wiring
+registerDefaultAdapters()
+app.log.info(`Adapter registry: ${adapterRegistry.sources().join(', ')} (${adapterRegistry.size} adapters)`)
+
 const databaseUrl = process.env.DATABASE_URL
-const heliusSecret = process.env.HELIUS_WEBHOOK_SECRET
 
 let resolverConsumer: RedpandaConsumer | null = null
 let watchlistConsumer: RedpandaConsumer | null = null
@@ -86,25 +96,29 @@ if (databaseUrl && redpandaBrokers) {
   })
   await resolverProducer.connect()
 
-  const resolver = new IdentityResolver(client, resolverProducer)
   const watchlist = new WalletWatchlist(client)
   await watchlist.loadSolanaWallets()
   await watchlist.loadBaseWallets()
   app.log.info(`Watchlist loaded: ${watchlist.getSolanaWallets().size} Solana, ${watchlist.getBaseWallets().size} Base wallets`)
 
-  // Start ERC-8004 consumer for resolver
-  resolverConsumer = new RedpandaConsumer({
-    brokers: redpandaBrokers.split(','),
-    groupId: 'oracle-api-resolver',
-  })
-  await resolverConsumer.subscribe([TOPICS.RAW_ERC8004])
-  resolverConsumer.runRaw(async (_key, value) => {
-    if (!value) return
-    const event = JSON.parse(value) as ERC8004Event
-    await resolver.handleERC8004Event(event)
-  }).catch((err) => {
-    app.log.error('ERC-8004 resolver consumer error:', err)
-  })
+  // Auto-discover identity topics from registry and subscribe
+  const identityTopics = getIdentityTopics()
+  if (identityTopics.length > 0) {
+    resolverConsumer = new RedpandaConsumer({
+      brokers: redpandaBrokers.split(','),
+      groupId: 'oracle-api-resolver',
+    })
+    await resolverConsumer.subscribe(identityTopics)
+    resolverConsumer.runRaw(async (_key, value) => {
+      if (!value) return
+      const event = JSON.parse(value) as Record<string, unknown>
+      const source = event.source as string
+      await dispatchIdentityEvent(source, event, client, resolverProducer!)
+    }).catch((err) => {
+      app.log.error('Identity resolver consumer error:', err)
+    })
+    app.log.info(`Identity resolver subscribed to: ${identityTopics.join(', ')}`)
+  }
 
   // Start watchlist consumer
   watchlistConsumer = new RedpandaConsumer({
@@ -120,10 +134,13 @@ if (databaseUrl && redpandaBrokers) {
     app.log.error('Watchlist consumer error:', err)
   })
 
-  // Register Helius webhook if secret is configured
-  if (heliusSecret) {
-    registerHeliusWebhook(app, resolverProducer, watchlist.getSolanaWallets(), heliusSecret)
-    app.log.info('Helius webhook endpoint registered')
+  // Auto-mount webhook routes from registry
+  const webhookCount = mountWebhookRoutes(app, resolverProducer, {
+    env: process.env as Record<string, string | undefined>,
+    services: { watchlist },
+  })
+  if (webhookCount > 0) {
+    app.log.info(`${webhookCount} webhook route(s) auto-mounted from adapter registry`)
   }
 
   app.log.info('Identity resolver started')

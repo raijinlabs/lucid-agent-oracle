@@ -54,8 +54,8 @@ export interface RawEconomicEvent {
   correction_reason: string | null
 }
 
-/** Data source identifiers — each maps to an adapter in the ingestion pipeline */
-export type EventSource =
+/** Built-in data source identifiers — each maps to an adapter in the ingestion pipeline */
+export type KnownEventSource =
   | 'lucid_gateway'
   | 'virtuals_acp'
   | 'olas_gnosis'
@@ -65,6 +65,9 @@ export type EventSource =
   | 'agent_wallets_sol'
   | 'agent_wallets_evm'
   | 'cookie_api'
+
+/** Extensible event source — accepts known sources with autocomplete + any custom string */
+export type EventSource = KnownEventSource | (string & {})
 
 /** Supported blockchain identifiers */
 export type ChainId =

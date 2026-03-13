@@ -11,14 +11,32 @@ export { computeAEGDP, type AEGDPInputs, type AEGDPResult } from './feeds/aegdp.
 export { computeAAI, AAI_WEIGHTS, AAI_NORMALIZATION, type AAIInputs, type AAIResult } from './feeds/aai.js'
 export { computeAPRI, APRI_WEIGHTS, type APRIInputs, type APRIResult } from './feeds/apri.js'
 
-// Adapters
+// Adapter framework
+export type {
+  AdapterDefinition,
+  WebhookAdapter,
+  WebhookContext,
+  IdentityHandler,
+  DbClient,
+} from './adapters/adapter-types.js'
+export { AdapterRegistry, adapterRegistry } from './adapters/registry.js'
+export { registerDefaultAdapters } from './adapters/register-defaults.js'
+export { topicForSource } from './adapters/topic-for-source.js'
+export { mountWebhookRoutes } from './adapters/webhook-router.js'
+export { dispatchIdentityEvent, getIdentityTopics } from './adapters/identity-dispatch.js'
+
+// Built-in adapter definitions
+export { gatewayTapAdapter } from './adapters/gateway-tap-adapter.js'
+export { erc8004Adapter } from './adapters/erc8004-adapter.js'
+export { heliusAdapter } from './adapters/helius-adapter.js'
+
+// Adapter normalizers (low-level — prefer adapter definitions for new integrations)
 export {
   transformReceiptEvent,
   transformAuditLogEntry,
   transformPaymentSession,
 } from './adapters/gateway-tap.js'
 
-// Adapters (ERC-8004)
 export {
   normalizeAgentRegistered,
   normalizeAgentUpdated,
@@ -26,7 +44,6 @@ export {
   normalizeReputationUpdated,
 } from './adapters/erc8004.js'
 
-// Adapters (Helius)
 export { normalizeHeliusTransaction, verifyHeliusSignature, type HeliusTransaction } from './adapters/helius.js'
 
 // Clients
