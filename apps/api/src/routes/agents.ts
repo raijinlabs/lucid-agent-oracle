@@ -27,6 +27,9 @@ export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
   // MUST be registered before /:id to avoid "search" matching as :id param
   app.get('/v1/oracle/agents/search', {
     schema: {
+      tags: ['agents'],
+      summary: 'Search agents',
+      description: 'Search for agent entities by wallet, protocol, ERC-8004 ID, or free-text query.',
       querystring: AgentSearchQuery,
       response: {
         200: AgentSearchResponse,
@@ -99,6 +102,9 @@ export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
   // MUST be registered before /:id to avoid "leaderboard" matching as :id param
   app.get('/v1/oracle/agents/leaderboard', {
     schema: {
+      tags: ['agents'],
+      summary: 'Agent leaderboard',
+      description: 'Ranked list of agents by wallet count, protocol count, evidence count, or newest.',
       querystring: LeaderboardQuery,
       response: {
         200: LeaderboardResponse,
@@ -164,6 +170,9 @@ export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
   // ---- GET /v1/oracle/agents/:id (Free) ----
   app.get('/v1/oracle/agents/:id', {
     schema: {
+      tags: ['agents'],
+      summary: 'Get agent profile',
+      description: 'Retrieve an agent entity profile including wallets, protocols, and reputation.',
       params: AgentIdParams,
       response: {
         200: AgentProfileResponse,
@@ -220,6 +229,9 @@ export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
   // ---- GET /v1/oracle/agents/:id/metrics (Pro) ----
   app.get('/v1/oracle/agents/:id/metrics', {
     schema: {
+      tags: ['agents'],
+      summary: 'Get agent metrics',
+      description: 'Detailed wallet, evidence, protocol, and conflict metrics for an agent. Requires pro tier.',
       params: AgentIdParams,
       security: [{ apiKey: [] }],
       response: {
@@ -269,6 +281,9 @@ export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
   // ---- GET /v1/oracle/agents/:id/activity (Pro) ----
   app.get('/v1/oracle/agents/:id/activity', {
     schema: {
+      tags: ['agents'],
+      summary: 'Get agent activity',
+      description: 'Chronological activity feed for an agent (wallet links, evidence, conflicts). Requires pro tier.',
       params: AgentIdParams,
       querystring: ActivityQuery,
       security: [{ apiKey: [] }],

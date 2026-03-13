@@ -17,6 +17,8 @@ export function registerProtocolRoutes(app: FastifyInstance, db: DbClient): void
   app.get('/v1/oracle/protocols', {
     schema: {
       tags: ['protocols'],
+      summary: 'List protocols',
+      description: 'List all indexed protocols with their chain support and status.',
       response: { 200: ProtocolListResponse },
     },
     config: {
@@ -38,6 +40,8 @@ export function registerProtocolRoutes(app: FastifyInstance, db: DbClient): void
   app.get<{ Params: { id: string } }>('/v1/oracle/protocols/:id', {
     schema: {
       tags: ['protocols'],
+      summary: 'Get protocol detail',
+      description: 'Retrieve protocol detail including agent and wallet counts.',
       params: ProtocolIdParams,
       response: {
         200: ProtocolDetailResponse,
@@ -79,6 +83,8 @@ export function registerProtocolRoutes(app: FastifyInstance, db: DbClient): void
   app.get<{ Params: { id: string } }>('/v1/oracle/protocols/:id/metrics', {
     schema: {
       tags: ['protocols'],
+      summary: 'Get protocol metrics',
+      description: 'Detailed protocol metrics including agent counts, wallets, evidence, and recent activity. Requires pro tier.',
       params: ProtocolIdParams,
       security: [{ apiKey: [] }],
       response: {

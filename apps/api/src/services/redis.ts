@@ -31,7 +31,7 @@ export function getRedis(): RedisClientType | null {
 /** Gracefully quit and null the Redis client. */
 export async function closeRedis(): Promise<void> {
   if (_client) {
-    await _client.quit()
+    await _client.quit().catch(() => {})
     _client = null
   }
 }

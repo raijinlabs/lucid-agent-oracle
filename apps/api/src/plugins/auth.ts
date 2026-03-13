@@ -82,7 +82,7 @@ const authPluginImpl: FastifyPluginAsync<AuthPluginOptions> = async (fastify, op
         .code(401)
         .header('content-type', 'application/problem+json')
         .send({
-          type: 'https://lucid.foundation/errors/invalid-api-key',
+          type: 'https://oracle.lucid.foundation/errors/invalid-api-key',
           title: 'Invalid API Key',
           status: 401,
           detail: 'The provided API key is not recognised or has been revoked.',
@@ -113,7 +113,7 @@ export const authPlugin = fp(authPluginImpl, {
 // requireTier helper — returns a preHandler that enforces minimum plan
 // ---------------------------------------------------------------------------
 
-export function requireTier(minTier: string) {
+export function requireTier(minTier: 'pro' | 'growth') {
   return async function tierPreHandler(request: FastifyRequest, reply: FastifyReply) {
     const tenantRank = tierRank(request.tenant.plan)
     const minRank = tierRank(minTier)
@@ -123,7 +123,7 @@ export function requireTier(minTier: string) {
         .code(403)
         .header('content-type', 'application/problem+json')
         .send({
-          type: 'https://lucid.foundation/errors/tier-required',
+          type: 'https://oracle.lucid.foundation/errors/tier-required',
           title: 'Insufficient Plan Tier',
           status: 403,
           detail: `This endpoint requires plan '${minTier}' or higher. Your current plan is '${request.tenant.plan}'.`,
