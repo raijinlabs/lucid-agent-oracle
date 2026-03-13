@@ -17,6 +17,8 @@ import { registerOracleRoutes, initFeedCache, handleIndexUpdate, reconcileFeedCa
 import { WalletWatchlist } from './services/wallet-watchlist.js'
 import { registerIdentityRoutes, cleanupExpiredChallenges } from './routes/identity-registration.js'
 import { registerAdminRoutes } from './routes/identity-admin.js'
+import { registerAgentRoutes } from './routes/agents.js'
+import { registerProtocolRoutes } from './routes/protocols.js'
 import { LucidResolver } from './services/lucid-resolver.js'
 
 const PORT = parseInt(process.env.PORT ?? '4040', 10)
@@ -151,6 +153,11 @@ if (databaseUrl && redpandaBrokers) {
   if (webhookCount > 0) {
     app.log.info(`${webhookCount} webhook route(s) auto-mounted from adapter registry`)
   }
+
+  // Plan 3A: Agent + protocol query routes
+  registerAgentRoutes(app, client)
+  registerProtocolRoutes(app, client)
+  app.log.info('Agent query + protocol routes mounted')
 
   // Plan 4B: Self-registration + admin endpoints
   registerIdentityRoutes(app, client, resolverProducer)
