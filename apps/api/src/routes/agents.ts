@@ -1,101 +1,325 @@
 import type { FastifyInstance } from 'fastify'
 import type { DbClient } from '@lucid/oracle-core'
 import { AgentQueryService } from '../services/agent-query.js'
-
-const ALLOWED_SORTS = ['wallet_count', 'protocol_count', 'evidence_count', 'newest'] as const
+import {
+  AgentSearchQuery,
+  AgentSearchResponse,
+  LeaderboardQuery,
+  LeaderboardResponse,
+  AgentProfileResponse,
+  AgentMetricsResponse,
+  ActivityQuery,
+  ActivityResponse,
+} from '../schemas/agents.js'
+import {
+  AgentIdParams,
+  ProblemDetail,
+  sendProblem,
+} from '../schemas/common.js'
+import { requireTier } from '../plugins/auth.js'
+import { encodeCursor, decodeCursor } from '../utils/cursor.js'
+import { keys } from '../services/redis.js'
 
 export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
   const service = new AgentQueryService(db)
 
-  // ---- GET /v1/oracle/agents/search ----
+  // ---- GET /v1/oracle/agents/search (Free) ----
   // MUST be registered before /:id to avoid "search" matching as :id param
-  app.get('/v1/oracle/agents/search', async (request, reply) => {
-    const query = request.query as Record<string, string>
+  app.get('/v1/oracle/agents/search', {
+    schema: {
+      querystring: AgentSearchQuery,
+      response: {
+        200: AgentSearchResponse,
+        400: { $ref: 'ProblemDetail' },
+      },
+    },
+    config: {
+      rateLimit: { max: 30 },
+    },
+  }, async (request, reply) => {
+    const query = request.query as {
+      wallet?: string
+      chain?: string
+      protocol?: string
+      protocol_id?: string
+      erc8004_id?: string
+      q?: string
+      limit?: number
+      cursor?: string
+    }
+
     const { wallet, chain, protocol, protocol_id, erc8004_id, q } = query
 
-    // At least one search param required (chain alone is not a valid search — it's a sub-filter for wallet)
+    // At least one search param required
     if (!wallet && !protocol && !protocol_id && !erc8004_id && !q) {
-      return reply.status(400).send({
-        error: 'At least one search parameter required (wallet, chain, protocol, protocol_id, erc8004_id, q)',
+      return sendProblem(reply, 400, {
+        type: 'missing-search-param',
+        title: 'Missing Search Parameter',
+        detail: 'At least one search parameter required (wallet, protocol, protocol_id, erc8004_id, q).',
+        code: 'MISSING_SEARCH_PARAM',
       })
     }
 
-    const limit = Math.min(parseInt(query.limit ?? '20', 10) || 20, 100)
-    const offset = Math.max(parseInt(query.offset ?? '0', 10) || 0, 0)
+    const limit = query.limit ?? 20
+
+    // Decode cursor if present
+    let cursorValue: string | undefined
+    let cursorId: string | undefined
+    if (query.cursor) {
+      const decoded = decodeCursor(query.cursor)
+      if (decoded) {
+        cursorValue = String(decoded.s)
+        cursorId = decoded.id
+      }
+    }
 
     const result = await service.search({
-      wallet, chain, protocol, protocol_id, erc8004_id, q, limit, offset,
+      wallet, chain, protocol, protocol_id, erc8004_id, q,
+      limit,
+      offset: 0,
+      cursorValue,
+      cursorId,
     })
 
-    return reply.send({ agents: result.agents, total: result.total, limit, offset })
+    const nextCursor = result.has_more && result.last_sort_value !== undefined && result.last_id
+      ? encodeCursor(result.last_sort_value, result.last_id)
+      : null
+
+    return reply.send({
+      data: result.data,
+      pagination: {
+        next_cursor: nextCursor,
+        has_more: result.has_more,
+        limit,
+      },
+    })
   })
 
-  // ---- GET /v1/oracle/agents/leaderboard ----
+  // ---- GET /v1/oracle/agents/leaderboard (Free) ----
   // MUST be registered before /:id to avoid "leaderboard" matching as :id param
-  app.get('/v1/oracle/agents/leaderboard', async (request, reply) => {
-    const query = request.query as Record<string, string>
-    const sortParam = query.sort ?? 'wallet_count'
-    const sort = ALLOWED_SORTS.includes(sortParam as any)
-      ? (sortParam as typeof ALLOWED_SORTS[number])
-      : 'wallet_count'
-    const limit = Math.min(parseInt(query.limit ?? '20', 10) || 20, 100)
-    const offset = Math.max(parseInt(query.offset ?? '0', 10) || 0, 0)
+  app.get('/v1/oracle/agents/leaderboard', {
+    schema: {
+      querystring: LeaderboardQuery,
+      response: {
+        200: LeaderboardResponse,
+      },
+    },
+    config: {
+      cache: {
+        ttl: 60,
+        key: (request: { query: Record<string, string>; tenant?: { plan: string } }) => {
+          const q = request.query
+          const version = (globalThis as Record<string, unknown>).__lbVersion ?? 0
+          const sort = q.sort ?? 'wallet_count'
+          const cursor = q.cursor ?? ''
+          const plan = request.tenant?.plan ?? 'free'
+          return keys.leaderboard(version as number, sort, cursor, plan)
+        },
+      },
+      rateLimit: { max: 60 },
+    },
+  }, async (request, reply) => {
+    const query = request.query as {
+      sort?: 'wallet_count' | 'protocol_count' | 'evidence_count' | 'newest'
+      limit?: number
+      cursor?: string
+    }
 
-    const result = await service.leaderboard({ sort, limit, offset })
+    const sort = query.sort ?? 'wallet_count'
+    const limit = query.limit ?? 20
 
-    return reply.send({ agents: result.agents, sort, total: result.total, limit, offset })
+    // Decode cursor if present
+    let cursorValue: number | string | undefined
+    let cursorId: string | undefined
+    if (query.cursor) {
+      const decoded = decodeCursor(query.cursor)
+      if (decoded) {
+        cursorValue = decoded.s
+        cursorId = decoded.id
+      }
+    }
+
+    const result = await service.leaderboard({
+      sort,
+      limit,
+      offset: 0,
+      cursorValue,
+      cursorId,
+    })
+
+    const nextCursor = result.has_more && result.last_sort_value !== undefined && result.last_id
+      ? encodeCursor(result.last_sort_value, result.last_id)
+      : null
+
+    return reply.send({
+      data: result.data,
+      pagination: {
+        next_cursor: nextCursor,
+        has_more: result.has_more,
+        limit,
+      },
+    })
   })
 
-  // ---- GET /v1/oracle/agents/:id ----
-  app.get('/v1/oracle/agents/:id', async (request, reply) => {
+  // ---- GET /v1/oracle/agents/:id (Free) ----
+  app.get('/v1/oracle/agents/:id', {
+    schema: {
+      params: AgentIdParams,
+      response: {
+        200: AgentProfileResponse,
+        404: { $ref: 'ProblemDetail' },
+      },
+    },
+    config: {
+      cache: { ttl: 30 },
+      rateLimit: { max: 60 },
+    },
+  }, async (request, reply) => {
     const { id } = request.params as { id: string }
 
     const agent = await service.getProfile(id)
     if (!agent) {
-      return reply.status(404).send({ error: 'Agent not found' })
+      return sendProblem(reply, 404, {
+        type: 'agent-not-found',
+        title: 'Agent Not Found',
+        detail: `No agent entity found with id '${id}'.`,
+        code: 'AGENT_NOT_FOUND',
+      })
     }
 
-    return reply.send({ agent })
+    // Map service shape to API shape
+    const reputation = agent.reputation_json && agent.reputation_updated_at
+      ? { score: (agent.reputation_json as Record<string, unknown>).score as number ?? 0, updated_at: agent.reputation_updated_at }
+      : null
+
+    return reply.send({
+      data: {
+        id: agent.id,
+        display_name: agent.display_name,
+        erc8004_id: agent.erc8004_id,
+        lucid_tenant: agent.lucid_tenant,
+        reputation,
+        wallets: agent.wallets,
+        protocols: agent.identity_links,
+        stats: {
+          wallet_count: agent.wallets.length,
+          protocol_count: agent.identity_links.length,
+          evidence_count: agent.evidence_count,
+        },
+        created_at: agent.created_at,
+        updated_at: agent.updated_at,
+      },
+    })
   })
 
   // ---- GET /v1/oracle/agents/:id/metrics (Pro) ----
-  app.get('/v1/oracle/agents/:id/metrics', async (request, reply) => {
-    const tier = (request.headers['x-api-tier'] as string) ?? 'free'
-    if (tier === 'free') {
-      return reply.status(403).send({ error: 'Pro tier required' })
-    }
-
+  app.get('/v1/oracle/agents/:id/metrics', {
+    schema: {
+      params: AgentIdParams,
+      security: [{ apiKey: [] }],
+      response: {
+        200: AgentMetricsResponse,
+        403: { $ref: 'ProblemDetail' },
+        404: { $ref: 'ProblemDetail' },
+      },
+    },
+    preHandler: [requireTier('pro')],
+    config: {
+      cache: {
+        ttl: 60,
+        key: (request: { params: Record<string, string>; tenant?: { plan: string } }) => {
+          const id = request.params.id
+          const plan = request.tenant?.plan ?? 'free'
+          return keys.agentMetrics(id, plan)
+        },
+      },
+      rateLimit: { max: 30 },
+    },
+  }, async (request, reply) => {
     const { id } = request.params as { id: string }
 
     const metrics = await service.getMetrics(id)
     if (!metrics) {
-      return reply.status(404).send({ error: 'Agent not found' })
+      return sendProblem(reply, 404, {
+        type: 'agent-not-found',
+        title: 'Agent Not Found',
+        detail: `No agent entity found with id '${id}'.`,
+        code: 'AGENT_NOT_FOUND',
+      })
     }
 
-    return reply.send(metrics)
+    return reply.send({
+      data: {
+        agent_id: metrics.id,
+        wallets: metrics.wallets,
+        evidence: metrics.evidence,
+        protocols: metrics.protocols,
+        conflicts: metrics.conflicts,
+        first_seen: metrics.first_seen,
+        last_active: metrics.last_active,
+      },
+    })
   })
 
   // ---- GET /v1/oracle/agents/:id/activity (Pro) ----
-  app.get('/v1/oracle/agents/:id/activity', async (request, reply) => {
-    const tier = (request.headers['x-api-tier'] as string) ?? 'free'
-    if (tier === 'free') {
-      return reply.status(403).send({ error: 'Pro tier required' })
-    }
-
+  app.get('/v1/oracle/agents/:id/activity', {
+    schema: {
+      params: AgentIdParams,
+      querystring: ActivityQuery,
+      security: [{ apiKey: [] }],
+      response: {
+        200: ActivityResponse,
+        403: { $ref: 'ProblemDetail' },
+        404: { $ref: 'ProblemDetail' },
+      },
+    },
+    preHandler: [requireTier('pro')],
+    config: {
+      rateLimit: { max: 30 },
+    },
+  }, async (request, reply) => {
     const { id } = request.params as { id: string }
 
-    // Lightweight existence check instead of full profile load
+    // Lightweight existence check
     const exists = await service.exists(id)
     if (!exists) {
-      return reply.status(404).send({ error: 'Agent not found' })
+      return sendProblem(reply, 404, {
+        type: 'agent-not-found',
+        title: 'Agent Not Found',
+        detail: `No agent entity found with id '${id}'.`,
+        code: 'AGENT_NOT_FOUND',
+      })
     }
 
-    const query = request.query as Record<string, string>
-    const limit = Math.min(parseInt(query.limit ?? '20', 10) || 20, 100)
-    const offset = Math.max(parseInt(query.offset ?? '0', 10) || 0, 0)
+    const query = request.query as { limit?: number; cursor?: string }
+    const limit = query.limit ?? 20
 
-    const result = await service.getActivity(id, { limit, offset })
+    // Decode cursor if present
+    let cursorTimestamp: string | undefined
+    if (query.cursor) {
+      const decoded = decodeCursor(query.cursor)
+      if (decoded) {
+        cursorTimestamp = String(decoded.s)
+      }
+    }
 
-    return reply.send({ agent_id: id, events: result.events, limit, offset })
+    const result = await service.getActivity(id, {
+      limit,
+      offset: 0,
+      cursorTimestamp,
+    })
+
+    const nextCursor = result.has_more && result.last_sort_value !== undefined
+      ? encodeCursor(result.last_sort_value, id)
+      : null
+
+    return reply.send({
+      data: result.data,
+      pagination: {
+        next_cursor: nextCursor,
+        has_more: result.has_more,
+        limit,
+      },
+    })
   })
 }
