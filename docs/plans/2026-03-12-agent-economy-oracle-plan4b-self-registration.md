@@ -357,7 +357,7 @@ git commit -m "feat(4b): WalletVerifier interface + VerifierRegistry"
 
 - [ ] **Step 1: Install ethers**
 
-Run: `cd /c/lucid-agent-oracle && npm install ethers --workspace=packages/core`
+Run: `cd /c/lucid-agent-oracle && npm install ethers bs58 --workspace=packages/core`
 
 - [ ] **Step 2: Write the failing test**
 
@@ -462,8 +462,9 @@ describe('SolanaVerifier', () => {
     expect(solanaVerifier.chains).toEqual(['solana'])
   })
 
-  it('verifies a valid Ed25519 signature', async () => {
+  it('verifies a valid Ed25519 signature (base58 encoded)', async () => {
     const ed = await import('@noble/ed25519')
+    const bs58 = (await import('bs58')).default
     // Generate keypair
     const privKey = ed.utils.randomPrivateKey()
     const pubKey = await ed.getPublicKeyAsync(privKey)
@@ -471,34 +472,28 @@ describe('SolanaVerifier', () => {
     const msgBytes = new TextEncoder().encode(message)
     const signature = await ed.signAsync(msgBytes, privKey)
 
-    // Encode as base58 for the verifier interface
-    const { base58 } = await import('./test-utils-base58.js').catch(() => {
-      // Inline minimal base58 for test — or use Buffer
-      return { base58: null }
-    })
+    // Encode as base58 (Solana native format)
+    const sigB58 = bs58.encode(signature)
+    const pubB58 = bs58.encode(pubKey)
 
-    // Use hex encoding as intermediate format for test
-    const sigHex = Buffer.from(signature).toString('hex')
-    const pubHex = Buffer.from(pubKey).toString('hex')
-
-    const result = await solanaVerifier.verify(pubHex, message, sigHex)
+    const result = await solanaVerifier.verify(pubB58, message, sigB58)
     expect(result).toBe(true)
   })
 
   it('rejects a signature from a different key', async () => {
     const ed = await import('@noble/ed25519')
+    const bs58 = (await import('bs58')).default
     const privKey = ed.utils.randomPrivateKey()
-    const pubKey = await ed.getPublicKeyAsync(privKey)
     const otherPriv = ed.utils.randomPrivateKey()
     const otherPub = await ed.getPublicKeyAsync(otherPriv)
     const message = 'test'
     const msgBytes = new TextEncoder().encode(message)
     const signature = await ed.signAsync(msgBytes, privKey)
 
-    const sigHex = Buffer.from(signature).toString('hex')
-    const otherPubHex = Buffer.from(otherPub).toString('hex')
+    const sigB58 = bs58.encode(signature)
+    const otherPubB58 = bs58.encode(otherPub)
 
-    const result = await solanaVerifier.verify(otherPubHex, message, sigHex)
+    const result = await solanaVerifier.verify(otherPubB58, message, sigB58)
     expect(result).toBe(false)
   })
 
@@ -509,7 +504,7 @@ describe('SolanaVerifier', () => {
 })
 ```
 
-**Note:** The Solana verifier accepts hex-encoded keys and signatures for the internal interface. The route handler converts base58 → hex before calling verify. This keeps the verifier simple and testable without a base58 dependency in core.
+**Note:** The Solana verifier accepts base58-encoded addresses and signatures — Solana's native encoding. No conversion needed at the route layer. `bs58` is already a transitive dependency.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -522,6 +517,7 @@ Expected: FAIL — module not found
 // packages/core/src/identity/solana-verifier.ts
 import { createHash } from 'node:crypto'
 import * as ed from '@noble/ed25519'
+import bs58 from 'bs58'
 import type { WalletVerifier } from './wallet-verifier.js'
 
 // Required for @noble/ed25519 v2 in Node.js — must run before any verify call.
@@ -532,29 +528,24 @@ ed.etc.sha512Sync = (...msgs: Uint8Array[]): Uint8Array => {
   return new Uint8Array(h.digest())
 }
 
-/** Solana Ed25519 verifier — stateless, pure function */
+/**
+ * Solana Ed25519 verifier — stateless, pure function.
+ * Accepts base58-encoded addresses and signatures (Solana's native encoding).
+ * No conversion needed at the route layer.
+ */
 export const solanaVerifier: WalletVerifier = {
   chains: ['solana'],
 
   async verify(address: string, message: string, signature: string): Promise<boolean> {
     try {
       const msgBytes = new TextEncoder().encode(message)
-      const sigBytes = hexToBytes(signature)
-      const pubBytes = hexToBytes(address)
+      const sigBytes = bs58.decode(signature)   // base58 → Uint8Array (64 bytes)
+      const pubBytes = bs58.decode(address)     // base58 → Uint8Array (32 bytes)
       return await ed.verifyAsync(sigBytes, msgBytes, pubBytes)
     } catch {
       return false
     }
   },
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex
-  const bytes = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  }
-  return bytes
 }
 ```
 
@@ -1171,6 +1162,30 @@ export class RegistrationHandler {
             [entityId],
           )
         }
+      }
+
+      // 5b. Store auth proof if attaching to existing entity (audit trail)
+      if (challenge.target_entity && challenge.auth_chain && challenge.auth_address) {
+        await this.db.query(
+          `INSERT INTO identity_evidence
+           (agent_entity, evidence_type, chain, address, message, metadata_json)
+           VALUES ($1, 'signed_message', $2, $3, $4, $5)
+           ON CONFLICT (agent_entity, evidence_type, chain, address)
+           WHERE evidence_type = 'signed_message' AND revoked_at IS NULL
+           DO NOTHING`,
+          [
+            entityId,
+            challenge.auth_chain,
+            challenge.auth_address,
+            `[auth consent for ${challenge.chain}:${challenge.address}]`,
+            JSON.stringify({
+              verification_method: challenge.auth_chain === 'solana' ? 'ed25519' : 'personal_sign',
+              purpose: 'entity_authorization',
+              authorized_wallet: challenge.address,
+              authorized_chain: challenge.chain,
+            }),
+          ],
+        )
       }
 
       // 6. Revoke previous signed_message evidence for this wallet+entity
@@ -1826,13 +1841,25 @@ export class LucidResolver {
 
         if (foundErc8004Entity) {
           // Cross-source merge: enrich existing ERC-8004 entity
-          await this.db.query(
+          const { rows: enriched } = await this.db.query(
             `UPDATE agent_entities SET lucid_tenant = $1, updated_at = now()
-             WHERE id = $2 AND lucid_tenant IS NULL`,
+             WHERE id = $2 AND lucid_tenant IS NULL
+             RETURNING id`,
             [tenantId, foundErc8004Entity],
           )
-          entityId = foundErc8004Entity
-          result.enriched++
+          if (enriched.length === 0) {
+            // Entity already has a different lucid_tenant — skip enrichment, create new entity instead
+            console.warn(`[lucid-resolver] Entity ${foundErc8004Entity} already has a lucid_tenant, creating new entity for tenant ${tenantId}`)
+            entityId = `ae_${nanoid()}`
+            await this.db.query(
+              'INSERT INTO agent_entities (id, lucid_tenant, created_at, updated_at) VALUES ($1, $2, now(), now())',
+              [entityId, tenantId],
+            )
+            result.created++
+          } else {
+            entityId = foundErc8004Entity
+            result.enriched++
+          }
         } else {
           // Create new entity
           entityId = `ae_${nanoid()}`
@@ -1982,10 +2009,16 @@ describe('Admin conflict resolution', () => {
   })
 
   it('keep_existing: resolves conflict without mapping changes', async () => {
+    // 1. Lookup conflict
     db.query.mockResolvedValueOnce({
       rows: [{ id: 1, status: 'open', chain: 'base', address: '0xABC', existing_entity: 'ae_1', claiming_entity: 'ae_2' }],
     })
-    db.query.mockResolvedValueOnce({ rows: [] }) // UPDATE identity_conflicts
+    // 2. BEGIN
+    db.query.mockResolvedValueOnce({ rows: [] })
+    // 3. UPDATE identity_conflicts
+    db.query.mockResolvedValueOnce({ rows: [] })
+    // 4. COMMIT
+    db.query.mockResolvedValueOnce({ rows: [] })
 
     const result = await resolveConflict(db, producer, 1, {
       resolution: 'keep_existing',
@@ -2000,13 +2033,21 @@ describe('Admin conflict resolution', () => {
     )
   })
 
-  it('keep_claiming: soft-deletes existing mapping and creates new', async () => {
+  it('keep_claiming: soft-deletes existing mapping and creates new (in transaction)', async () => {
+    // 1. Lookup conflict
     db.query.mockResolvedValueOnce({
       rows: [{ id: 2, status: 'open', chain: 'base', address: '0xDEF', existing_entity: 'ae_1', claiming_entity: 'ae_2' }],
     })
-    db.query.mockResolvedValueOnce({ rows: [] }) // soft-delete existing mapping
-    db.query.mockResolvedValueOnce({ rows: [] }) // insert new mapping
-    db.query.mockResolvedValueOnce({ rows: [] }) // resolve conflict
+    // 2. BEGIN
+    db.query.mockResolvedValueOnce({ rows: [] })
+    // 3. Soft-delete existing mapping
+    db.query.mockResolvedValueOnce({ rows: [] })
+    // 4. Insert new mapping
+    db.query.mockResolvedValueOnce({ rows: [] })
+    // 5. Resolve conflict
+    db.query.mockResolvedValueOnce({ rows: [] })
+    // 6. COMMIT
+    db.query.mockResolvedValueOnce({ rows: [] })
 
     const result = await resolveConflict(db, producer, 2, {
       resolution: 'keep_claiming',
@@ -2015,7 +2056,7 @@ describe('Admin conflict resolution', () => {
     })
 
     expect(result.status).toBe(200)
-    // Should publish watchlist updates
+    // Should publish watchlist updates after commit
     expect(producer.publishJson).toHaveBeenCalled()
   })
 
@@ -2094,45 +2135,58 @@ export async function resolveConflict(
     return { status: 409, error: 'Conflict already resolved' }
   }
 
-  if (input.resolution === 'keep_claiming') {
-    // Soft-delete existing mapping
-    await db.query(
-      `UPDATE wallet_mappings SET removed_at = now()
-       WHERE chain = $1 AND LOWER(address) = LOWER($2)
-       AND agent_entity = $3 AND removed_at IS NULL`,
-      [conflict.chain, conflict.address, conflict.existing_entity],
-    )
+  // Wrap resolution in a transaction (especially important for keep_claiming
+  // which does soft-delete + insert + status update atomically)
+  await db.query('BEGIN')
 
-    // Create new mapping for claiming entity
-    await db.query(
-      `INSERT INTO wallet_mappings
-       (agent_entity, chain, address, link_type, confidence, evidence_hash)
-       VALUES ($1, $2, $3, 'self_claim', 1.0, NULL)`,
-      [conflict.claiming_entity, conflict.chain, conflict.address],
-    )
+  try {
+    if (input.resolution === 'keep_claiming') {
+      // Soft-delete existing mapping
+      await db.query(
+        `UPDATE wallet_mappings SET removed_at = now()
+         WHERE chain = $1 AND LOWER(address) = LOWER($2)
+         AND agent_entity = $3 AND removed_at IS NULL`,
+        [conflict.chain, conflict.address, conflict.existing_entity],
+      )
 
-    // Publish watchlist updates
-    const chain = conflict.chain as string
-    if (chain === 'solana' || chain === 'base') {
-      await producer.publishJson(TOPICS.WATCHLIST, `watchlist:${chain}`, {
-        action: 'remove', chain, address: conflict.address,
-        agent_entity_id: conflict.existing_entity,
-      }).catch(() => {})
-      await producer.publishJson(TOPICS.WATCHLIST, `watchlist:${chain}`, {
-        action: 'add', chain, address: conflict.address,
-        agent_entity_id: conflict.claiming_entity,
-      }).catch(() => {})
+      // Create new mapping for claiming entity
+      await db.query(
+        `INSERT INTO wallet_mappings
+         (agent_entity, chain, address, link_type, confidence, evidence_hash)
+         VALUES ($1, $2, $3, 'self_claim', 1.0, NULL)`,
+        [conflict.claiming_entity, conflict.chain, conflict.address],
+      )
     }
-  }
 
-  // Resolve conflict record
-  await db.query(
-    `UPDATE identity_conflicts
-     SET status = $1, resolution = $2, resolved_by = $3,
-         resolution_reason = $4, resolved_at = now()
-     WHERE id = $5`,
-    ['resolved', input.resolution, input.resolved_by, input.resolution_reason, conflictId],
-  )
+    // Resolve conflict record
+    await db.query(
+      `UPDATE identity_conflicts
+       SET status = $1, resolution = $2, resolved_by = $3,
+           resolution_reason = $4, resolved_at = now()
+       WHERE id = $5`,
+      ['resolved', input.resolution, input.resolved_by, input.resolution_reason, conflictId],
+    )
+
+    await db.query('COMMIT')
+
+    // Publish watchlist updates after commit (non-fatal side effects)
+    if (input.resolution === 'keep_claiming') {
+      const chain = conflict.chain as string
+      if (chain === 'solana' || chain === 'base') {
+        await producer.publishJson(TOPICS.WATCHLIST, `watchlist:${chain}`, {
+          action: 'remove', chain, address: conflict.address,
+          agent_entity_id: conflict.existing_entity,
+        }).catch(() => {})
+        await producer.publishJson(TOPICS.WATCHLIST, `watchlist:${chain}`, {
+          action: 'add', chain, address: conflict.address,
+          agent_entity_id: conflict.claiming_entity,
+        }).catch(() => {})
+      }
+    }
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {})
+    throw err
+  }
 
   return { status: 200, data: { id: conflictId, resolution: input.resolution } }
 }
