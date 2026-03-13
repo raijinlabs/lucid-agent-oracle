@@ -45,6 +45,8 @@ export interface SearchParams {
   q?: string
   limit: number
   offset: number
+  cursorValue?: string
+  cursorId?: string
 }
 
 export interface LeaderboardEntry {
@@ -61,6 +63,15 @@ export interface LeaderboardParams {
   sort: 'wallet_count' | 'protocol_count' | 'evidence_count' | 'newest'
   limit: number
   offset: number
+  cursorValue?: number | string
+  cursorId?: string
+}
+
+export interface CursorResult<T> {
+  data: T[]
+  has_more: boolean
+  last_sort_value?: string | number
+  last_id?: string
 }
 
 export interface AgentMetrics {
@@ -202,9 +213,8 @@ export class AgentQueryService {
 
   // ---- search ------------------------------------------------------------
 
-  async search(params: SearchParams): Promise<{ agents: AgentSearchResult[]; total: number }> {
+  async search(params: SearchParams): Promise<CursorResult<AgentSearchResult>> {
     const limit = Math.min(Math.max(params.limit, 1), 100)
-    const offset = Math.max(params.offset, 0)
 
     const conditions: string[] = []
     const values: unknown[] = []
@@ -252,102 +262,120 @@ export class AgentQueryService {
       values.push(`%${params.q}%`)
     }
 
+    // Keyset cursor condition
+    if (params.cursorValue && params.cursorId) {
+      const cvParam = nextParam()
+      const ciParam = nextParam()
+      conditions.push(`(ae.created_at, ae.id) < (${cvParam}, ${ciParam})`)
+      values.push(params.cursorValue)
+      values.push(params.cursorId)
+    }
+
     const whereClause = conditions.length > 0
       ? `WHERE ${conditions.join(' AND ')}`
       : ''
     const joinClause = joins.join(' ')
 
-    // Count query
-    const countSql = `SELECT COUNT(DISTINCT ae.id)::int AS cnt FROM agent_entities ae ${joinClause} ${whereClause}`
-    const { rows: countRows } = await this.db.query(countSql, values)
-    const total = (countRows[0]?.cnt as number) ?? 0
-
-    if (total === 0) {
-      return { agents: [], total: 0 }
-    }
-
-    // Data query
+    // Data query — fetch limit+1 for has_more detection
     const limitParam = nextParam()
-    values.push(limit)
-    const offsetParam = nextParam()
-    values.push(offset)
+    values.push(limit + 1)
 
     const dataSql = `SELECT DISTINCT ae.id, ae.display_name, ae.erc8004_id, ae.created_at
       FROM agent_entities ae ${joinClause} ${whereClause}
-      ORDER BY ae.created_at DESC
-      LIMIT ${limitParam} OFFSET ${offsetParam}`
+      ORDER BY ae.created_at DESC, ae.id DESC
+      LIMIT ${limitParam}`
 
     const { rows } = await this.db.query(dataSql, values)
 
+    const hasMore = rows.length > limit
+    const trimmed = hasMore ? rows.slice(0, limit) : rows
+
+    const data = trimmed.map((r) => ({
+      id: r.id as string,
+      display_name: (r.display_name as string) ?? null,
+      erc8004_id: (r.erc8004_id as string) ?? null,
+      created_at: String(r.created_at),
+    }))
+
+    const last = data[data.length - 1]
     return {
-      agents: rows.map((r) => ({
-        id: r.id as string,
-        display_name: (r.display_name as string) ?? null,
-        erc8004_id: (r.erc8004_id as string) ?? null,
-        created_at: String(r.created_at),
-      })),
-      total,
+      data,
+      has_more: hasMore,
+      ...(last ? { last_sort_value: last.created_at, last_id: last.id } : {}),
     }
   }
 
   // ---- leaderboard -------------------------------------------------------
 
-  async leaderboard(params: LeaderboardParams): Promise<{ agents: LeaderboardEntry[]; total: number }> {
+  async leaderboard(params: LeaderboardParams): Promise<CursorResult<LeaderboardEntry>> {
     const limit = Math.min(Math.max(params.limit, 1), 100)
-    const offset = Math.max(params.offset, 0)
 
-    const orderByMap: Record<LeaderboardParams['sort'], string> = {
-      wallet_count: 'wallet_count DESC',
-      protocol_count: 'protocol_count DESC',
-      evidence_count: 'evidence_count DESC',
-      newest: 'ae.created_at DESC',
+    const sortColumnMap: Record<LeaderboardParams['sort'], string> = {
+      wallet_count: 'wallet_count',
+      protocol_count: 'protocol_count',
+      evidence_count: 'evidence_count',
+      newest: 'created_at',
     }
-    const orderBy = orderByMap[params.sort] ?? 'wallet_count DESC'
+    const sortColumn = sortColumnMap[params.sort] ?? 'wallet_count'
 
-    // Count total agents
-    const { rows: countRows } = await this.db.query(
-      'SELECT COUNT(*)::int AS cnt FROM agent_entities',
-    )
-    const total = (countRows[0]?.cnt as number) ?? 0
-
-    if (total === 0) {
-      return { agents: [], total: 0 }
+    const values: unknown[] = []
+    let paramIdx = 0
+    const nextParam = (): string => {
+      paramIdx++
+      return `$${paramIdx}`
     }
+
+    let cursorWhere = ''
+    if (params.cursorValue !== undefined && params.cursorId) {
+      const cvParam = nextParam()
+      const ciParam = nextParam()
+      cursorWhere = `WHERE (${sortColumn}, id) < (${cvParam}, ${ciParam})`
+      values.push(params.cursorValue)
+      values.push(params.cursorId)
+    }
+
+    const limitParam = nextParam()
+    values.push(limit + 1)
 
     const sql = `
-      SELECT
-        ae.id,
-        ae.display_name,
-        ae.erc8004_id,
-        ae.created_at,
-        COUNT(DISTINCT wm.id)::int AS wallet_count,
-        COUNT(DISTINCT il.id)::int AS protocol_count,
-        COUNT(DISTINCT ie.id)::int AS evidence_count
-      FROM agent_entities ae
-      LEFT JOIN wallet_mappings wm
-        ON wm.agent_entity = ae.id AND wm.removed_at IS NULL
-      LEFT JOIN identity_links il
-        ON il.agent_entity = ae.id
-      LEFT JOIN identity_evidence ie
-        ON ie.agent_entity = ae.id AND ie.revoked_at IS NULL
-      GROUP BY ae.id, ae.display_name, ae.erc8004_id, ae.created_at
-      ORDER BY ${orderBy}
-      LIMIT $1 OFFSET $2
+      WITH ranked AS (
+        SELECT ae.id, ae.display_name, ae.erc8004_id, ae.created_at,
+          COUNT(DISTINCT wm.id)::int AS wallet_count,
+          COUNT(DISTINCT il.id)::int AS protocol_count,
+          COUNT(DISTINCT ie.id)::int AS evidence_count
+        FROM agent_entities ae
+        LEFT JOIN wallet_mappings wm ON wm.agent_entity = ae.id AND wm.removed_at IS NULL
+        LEFT JOIN identity_links il ON il.agent_entity = ae.id
+        LEFT JOIN identity_evidence ie ON ie.agent_entity = ae.id AND ie.revoked_at IS NULL
+        GROUP BY ae.id, ae.display_name, ae.erc8004_id, ae.created_at
+      )
+      SELECT * FROM ranked
+      ${cursorWhere}
+      ORDER BY ${sortColumn} DESC, id DESC
+      LIMIT ${limitParam}
     `
 
-    const { rows } = await this.db.query(sql, [limit, offset])
+    const { rows } = await this.db.query(sql, values)
 
+    const hasMore = rows.length > limit
+    const trimmed = hasMore ? rows.slice(0, limit) : rows
+
+    const data = trimmed.map((r) => ({
+      id: r.id as string,
+      display_name: (r.display_name as string) ?? null,
+      erc8004_id: (r.erc8004_id as string) ?? null,
+      wallet_count: (r.wallet_count as number) ?? 0,
+      protocol_count: (r.protocol_count as number) ?? 0,
+      evidence_count: (r.evidence_count as number) ?? 0,
+      created_at: String(r.created_at),
+    }))
+
+    const last = data[data.length - 1]
+    const lastSortValue = last ? (last as Record<string, unknown>)[sortColumn] as string | number : undefined
     return {
-      agents: rows.map((r) => ({
-        id: r.id as string,
-        display_name: (r.display_name as string) ?? null,
-        erc8004_id: (r.erc8004_id as string) ?? null,
-        wallet_count: (r.wallet_count as number) ?? 0,
-        protocol_count: (r.protocol_count as number) ?? 0,
-        evidence_count: (r.evidence_count as number) ?? 0,
-        created_at: String(r.created_at),
-      })),
-      total,
+      data,
+      has_more: hasMore,
+      ...(last ? { last_sort_value: lastSortValue, last_id: last.id } : {}),
     }
   }
 
@@ -482,10 +510,26 @@ export class AgentQueryService {
 
   async getActivity(
     id: string,
-    params: { limit: number; offset: number },
-  ): Promise<{ events: ActivityEvent[] }> {
+    params: { limit: number; offset: number; cursorTimestamp?: string },
+  ): Promise<CursorResult<ActivityEvent>> {
     const safeLimit = Math.min(Math.max(params.limit, 1), 100)
-    const safeOffset = Math.max(params.offset, 0)
+
+    const values: unknown[] = [id]
+    let paramIdx = 1
+
+    const cursorFilter1 = params.cursorTimestamp
+      ? (() => { paramIdx++; values.push(params.cursorTimestamp); return ` AND verified_at < $${paramIdx}` })()
+      : ''
+    const cursorFilter2 = params.cursorTimestamp
+      ? (() => { paramIdx++; values.push(params.cursorTimestamp); return ` AND created_at < $${paramIdx}` })()
+      : ''
+    const cursorFilter3 = params.cursorTimestamp
+      ? (() => { paramIdx++; values.push(params.cursorTimestamp); return ` AND created_at < $${paramIdx}` })()
+      : ''
+
+    paramIdx++
+    values.push(safeLimit + 1)
+    const limitParam = `$${paramIdx}`
 
     const sql = `
       SELECT type, timestamp, detail FROM (
@@ -498,7 +542,7 @@ export class AgentQueryService {
             'address', address
           ) AS detail
         FROM identity_evidence
-        WHERE agent_entity = $1 AND revoked_at IS NULL
+        WHERE agent_entity = $1 AND revoked_at IS NULL${cursorFilter1}
 
         UNION ALL
 
@@ -515,7 +559,7 @@ export class AgentQueryService {
             'status', status
           ) AS detail
         FROM identity_conflicts
-        WHERE existing_entity = $1 OR claiming_entity = $1
+        WHERE (existing_entity = $1 OR claiming_entity = $1)${cursorFilter2}
 
         UNION ALL
 
@@ -528,20 +572,28 @@ export class AgentQueryService {
             'link_type', link_type
           ) AS detail
         FROM wallet_mappings
-        WHERE agent_entity = $1 AND removed_at IS NULL
+        WHERE agent_entity = $1 AND removed_at IS NULL${cursorFilter3}
       ) AS events
       ORDER BY timestamp DESC
-      LIMIT $2 OFFSET $3
+      LIMIT ${limitParam}
     `
 
-    const { rows } = await this.db.query(sql, [id, safeLimit, safeOffset])
+    const { rows } = await this.db.query(sql, values)
 
+    const hasMore = rows.length > safeLimit
+    const trimmed = hasMore ? rows.slice(0, safeLimit) : rows
+
+    const data = trimmed.map((r) => ({
+      type: r.type as ActivityEvent['type'],
+      timestamp: String(r.timestamp),
+      detail: (typeof r.detail === 'string' ? JSON.parse(r.detail) : r.detail) as Record<string, unknown>,
+    }))
+
+    const last = data[data.length - 1]
     return {
-      events: rows.map((r) => ({
-        type: r.type as ActivityEvent['type'],
-        timestamp: String(r.timestamp),
-        detail: (typeof r.detail === 'string' ? JSON.parse(r.detail) : r.detail) as Record<string, unknown>,
-      })),
+      data,
+      has_more: hasMore,
+      ...(last ? { last_sort_value: last.timestamp } : {}),
     }
   }
 

@@ -44,58 +44,108 @@ describe('AgentQueryService', () => {
 
   describe('search', () => {
     it('returns empty results when no agents match', async () => {
-      // Count returns 0
-      db.query.mockResolvedValueOnce({ rows: [{ cnt: 0 }] })
+      // Data query returns no rows
+      db.query.mockResolvedValueOnce({ rows: [] })
       const result = await service.search({ wallet: '0xNONE', limit: 20, offset: 0 })
-      expect(result.agents).toHaveLength(0)
-      expect(result.total).toBe(0)
+      expect(result.data).toHaveLength(0)
+      expect(result.has_more).toBe(false)
     })
 
     it('searches by wallet address', async () => {
-      db.query.mockResolvedValueOnce({ rows: [{ cnt: 1 }] })
       db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_1', display_name: 'Agent', erc8004_id: null, created_at: '2026-03-12' }] })
       const result = await service.search({ wallet: '0xABC', limit: 20, offset: 0 })
-      expect(result.agents).toHaveLength(1)
-      expect(result.total).toBe(1)
+      expect(result.data).toHaveLength(1)
+      expect(result.has_more).toBe(false)
       // Verify wallet join was used
       expect(db.query.mock.calls[0][0]).toContain('wallet_mappings')
       expect(db.query.mock.calls[0][0]).toContain('LOWER')
     })
 
     it('searches by display name with ILIKE', async () => {
-      db.query.mockResolvedValueOnce({ rows: [{ cnt: 1 }] })
       db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_2', display_name: 'Test Agent', erc8004_id: null, created_at: '2026-03-12' }] })
       const result = await service.search({ q: 'Test', limit: 20, offset: 0 })
-      expect(result.agents).toHaveLength(1)
+      expect(result.data).toHaveLength(1)
       expect(db.query.mock.calls[0][0]).toContain('ILIKE')
     })
 
     it('searches by erc8004_id', async () => {
-      db.query.mockResolvedValueOnce({ rows: [{ cnt: 1 }] })
       db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_3', display_name: null, erc8004_id: '42', created_at: '2026-03-12' }] })
       const result = await service.search({ erc8004_id: '42', limit: 20, offset: 0 })
-      expect(result.agents).toHaveLength(1)
+      expect(result.data).toHaveLength(1)
       expect(db.query.mock.calls[0][0]).toContain('erc8004_id')
+    })
+
+    it('detects has_more when extra row returned', async () => {
+      // Return limit+1 rows (limit=2, so 3 rows)
+      db.query.mockResolvedValueOnce({ rows: [
+        { id: 'ae_1', display_name: 'A', erc8004_id: null, created_at: '2026-03-12' },
+        { id: 'ae_2', display_name: 'B', erc8004_id: null, created_at: '2026-03-11' },
+        { id: 'ae_3', display_name: 'C', erc8004_id: null, created_at: '2026-03-10' },
+      ] })
+      const result = await service.search({ limit: 2, offset: 0 })
+      expect(result.data).toHaveLength(2)
+      expect(result.has_more).toBe(true)
+      expect(result.last_sort_value).toBe('2026-03-11')
+      expect(result.last_id).toBe('ae_2')
+    })
+
+    it('applies keyset cursor condition when cursorValue and cursorId provided', async () => {
+      db.query.mockResolvedValueOnce({ rows: [
+        { id: 'ae_4', display_name: 'D', erc8004_id: null, created_at: '2026-03-09' },
+      ] })
+      const result = await service.search({
+        limit: 20,
+        offset: 0,
+        cursorValue: '2026-03-10',
+        cursorId: 'ae_3',
+      })
+      expect(result.data).toHaveLength(1)
+      const sql = db.query.mock.calls[0][0] as string
+      expect(sql).toContain('(ae.created_at, ae.id) <')
     })
   })
 
   describe('leaderboard', () => {
     it('returns empty when no agents exist', async () => {
-      db.query.mockResolvedValueOnce({ rows: [{ cnt: 0 }] })
+      db.query.mockResolvedValueOnce({ rows: [] })
       const result = await service.leaderboard({ sort: 'wallet_count', limit: 20, offset: 0 })
-      expect(result.agents).toHaveLength(0)
+      expect(result.data).toHaveLength(0)
+      expect(result.has_more).toBe(false)
     })
 
     it('returns ranked agents with counts', async () => {
-      db.query.mockResolvedValueOnce({ rows: [{ cnt: 2 }] })
       db.query.mockResolvedValueOnce({ rows: [
         { id: 'ae_1', display_name: 'Top', erc8004_id: null, created_at: '2026-03-12', wallet_count: 5, protocol_count: 3, evidence_count: 10 },
         { id: 'ae_2', display_name: 'Second', erc8004_id: null, created_at: '2026-03-11', wallet_count: 3, protocol_count: 2, evidence_count: 5 },
       ] })
       const result = await service.leaderboard({ sort: 'wallet_count', limit: 20, offset: 0 })
-      expect(result.agents).toHaveLength(2)
-      expect(result.total).toBe(2)
-      expect(result.agents[0].wallet_count).toBe(5)
+      expect(result.data).toHaveLength(2)
+      expect(result.has_more).toBe(false)
+      expect(result.data[0].wallet_count).toBe(5)
+    })
+
+    it('uses CTE approach with WITH ranked AS', async () => {
+      db.query.mockResolvedValueOnce({ rows: [] })
+      await service.leaderboard({ sort: 'wallet_count', limit: 20, offset: 0 })
+      const sql = db.query.mock.calls[0][0] as string
+      expect(sql).toContain('WITH ranked AS')
+    })
+
+    it('applies cursor condition in CTE query', async () => {
+      db.query.mockResolvedValueOnce({ rows: [
+        { id: 'ae_3', display_name: 'Third', erc8004_id: null, created_at: '2026-03-10', wallet_count: 2, protocol_count: 1, evidence_count: 3 },
+      ] })
+      const result = await service.leaderboard({
+        sort: 'wallet_count',
+        limit: 20,
+        offset: 0,
+        cursorValue: 3,
+        cursorId: 'ae_2',
+      })
+      expect(result.data).toHaveLength(1)
+      const sql = db.query.mock.calls[0][0] as string
+      expect(sql).toContain('WITH ranked AS')
+      expect(sql).toContain('(wallet_count, id) <')
     })
   })
 
@@ -137,8 +187,39 @@ describe('AgentQueryService', () => {
       ] })
 
       const result = await service.getActivity('ae_1', { limit: 20, offset: 0 })
-      expect(result.events).toHaveLength(2)
-      expect(result.events[0].type).toBe('evidence_added')
+      expect(result.data).toHaveLength(2)
+      expect(result.data[0].type).toBe('evidence_added')
+      expect(result.has_more).toBe(false)
+    })
+
+    it('applies cursor timestamp filter to UNION ALL branches', async () => {
+      db.query.mockResolvedValueOnce({ rows: [
+        { type: 'wallet_linked', timestamp: '2026-03-11T10:00:00Z', detail: { chain: 'base', address: '0xDEF', link_type: 'self_claim' } },
+      ] })
+
+      const result = await service.getActivity('ae_1', {
+        limit: 20,
+        offset: 0,
+        cursorTimestamp: '2026-03-12T00:00:00Z',
+      })
+      expect(result.data).toHaveLength(1)
+      const sql = db.query.mock.calls[0][0] as string
+      expect(sql).toContain('verified_at <')
+      expect(sql).toContain('created_at <')
+    })
+
+    it('detects has_more for activity events', async () => {
+      // Return limit+1 rows (limit=2, so 3 rows)
+      db.query.mockResolvedValueOnce({ rows: [
+        { type: 'evidence_added', timestamp: '2026-03-12T12:00:00Z', detail: { evidence_type: 'signed_message', chain: 'base', address: '0xA' } },
+        { type: 'wallet_linked', timestamp: '2026-03-12T11:00:00Z', detail: { chain: 'base', address: '0xB', link_type: 'self_claim' } },
+        { type: 'conflict_opened', timestamp: '2026-03-12T10:00:00Z', detail: { chain: 'base', address: '0xC', role: 'existing', status: 'open' } },
+      ] })
+
+      const result = await service.getActivity('ae_1', { limit: 2, offset: 0 })
+      expect(result.data).toHaveLength(2)
+      expect(result.has_more).toBe(true)
+      expect(result.last_sort_value).toBe('2026-03-12T11:00:00Z')
     })
   })
 
