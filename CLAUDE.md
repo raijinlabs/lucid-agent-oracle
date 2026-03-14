@@ -27,11 +27,10 @@ Required env for tests: `CURSOR_SECRET=any-secret-value`
 ### MCP Generation (Plan 3B)
 
 ```bash
-npm run dev                     # Start API server
-curl http://localhost:4040/docs/json > openapi.json
-npx tsx scripts/annotate-openapi.ts openapi.json
-speakeasy validate -s openapi.json
-speakeasy generate -s openapi.json -o apps/mcp -t typescript
+CURSOR_SECRET=test npx tsx scripts/export-openapi.ts > openapi.json   # Export full spec (no DB needed)
+npx tsx scripts/annotate-openapi.ts openapi.json                      # Add x-speakeasy-mcp annotations
+speakeasy lint openapi --schema openapi.json                          # Validate (requires Speakeasy auth)
+speakeasy generate sdk --lang mcp-typescript --schema openapi.json --out apps/mcp -y  # Generate MCP server
 ```
 
 ## Tech Stack
