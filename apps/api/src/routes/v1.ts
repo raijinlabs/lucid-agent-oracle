@@ -5,6 +5,13 @@ import {
   type FeedId, type PublishedFeedRow,
 } from '@lucid/oracle-core'
 import { sendProblem } from '../schemas/common.js'
+import {
+  FeedIdParams,
+  FeedListResponse,
+  FeedDetailResponse,
+  FeedMethodologyResponse,
+  ReportLatestResponse,
+} from '../schemas/feeds.js'
 
 // In-memory cache (replaced from Map<string, PublishedFeedValue> to Map<string, PublishedFeedRow>)
 const latestFeedValues = new Map<string, PublishedFeedRow>()
@@ -74,8 +81,21 @@ export async function reconcileFeedCache(clickhouse: OracleClickHouse): Promise<
 }
 
 export function registerOracleRoutes(app: FastifyInstance): void {
+  // Register response schemas for OpenAPI
+  app.addSchema(FeedListResponse)
+  app.addSchema(FeedDetailResponse)
+  app.addSchema(FeedMethodologyResponse)
+  app.addSchema(ReportLatestResponse)
+
   // ---- GET /v1/oracle/feeds ----
-  app.get('/v1/oracle/feeds', async () => {
+  app.get('/v1/oracle/feeds', {
+    schema: {
+      tags: ['feeds'],
+      summary: 'List all feeds',
+      description: 'Current state of the agent economy — all 3 feed values with confidence and freshness.',
+      response: { 200: FeedListResponse },
+    },
+  }, async () => {
     return {
       feeds: Object.values(V1_FEEDS).map((f) => ({
         ...f,
@@ -85,7 +105,18 @@ export function registerOracleRoutes(app: FastifyInstance): void {
   })
 
   // ---- GET /v1/oracle/feeds/:id ----
-  app.get<{ Params: { id: string } }>('/v1/oracle/feeds/:id', async (request, reply) => {
+  app.get<{ Params: { id: string } }>('/v1/oracle/feeds/:id', {
+    schema: {
+      tags: ['feeds'],
+      summary: 'Get feed detail',
+      description: 'Deep dive on a single feed with its latest value and methodology URL.',
+      params: FeedIdParams,
+      response: {
+        200: FeedDetailResponse,
+        404: { $ref: 'ProblemDetail' },
+      },
+    },
+  }, async (request, reply) => {
     const { id } = request.params
     const def = V1_FEEDS[id as FeedId]
     if (!def) {
@@ -106,7 +137,18 @@ export function registerOracleRoutes(app: FastifyInstance): void {
   })
 
   // ---- GET /v1/oracle/feeds/:id/methodology ----
-  app.get<{ Params: { id: string } }>('/v1/oracle/feeds/:id/methodology', async (request, reply) => {
+  app.get<{ Params: { id: string } }>('/v1/oracle/feeds/:id/methodology', {
+    schema: {
+      tags: ['feeds'],
+      summary: 'Get feed methodology',
+      description: 'Detailed methodology for a feed including computation formula, weights, and anchors.',
+      params: FeedIdParams,
+      response: {
+        200: FeedMethodologyResponse,
+        404: { $ref: 'ProblemDetail' },
+      },
+    },
+  }, async (request, reply) => {
     const { id } = request.params
     const def = V1_FEEDS[id as FeedId]
     if (!def) {
@@ -180,7 +222,14 @@ export function registerOracleRoutes(app: FastifyInstance): void {
   })
 
   // ---- GET /v1/oracle/reports/latest ----
-  app.get('/v1/oracle/reports/latest', async () => {
+  app.get('/v1/oracle/reports/latest', {
+    schema: {
+      tags: ['reports'],
+      summary: 'Get latest report',
+      description: 'Latest signed oracle report with all feed values.',
+      response: { 200: ReportLatestResponse },
+    },
+  }, async () => {
     const feedValues = Array.from(latestFeedValues.entries()).map(([, r]) => toPublicFeedValue(r))
     return {
       report: feedValues.length > 0 ? { feeds: feedValues } : null,

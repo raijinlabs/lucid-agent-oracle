@@ -270,6 +270,129 @@ export class OracleClickHouse {
     return rows[0] ?? null
   }
 
+  // ---------------------------------------------------------------------------
+  // Plan 3B: Interval/period whitelist for safe SQL interpolation
+  // ---------------------------------------------------------------------------
+
+  private static readonly INTERVAL_SQL: Record<string, string> = {
+    '1m': 'INTERVAL 1 MINUTE',
+    '1h': 'INTERVAL 1 HOUR',
+    '1d': 'INTERVAL 1 DAY',
+  }
+
+  private static readonly PERIOD_SQL: Record<string, string> = {
+    '1d': 'INTERVAL 1 DAY',
+    '7d': 'INTERVAL 7 DAY',
+    '30d': 'INTERVAL 30 DAY',
+    '90d': 'INTERVAL 90 DAY',
+  }
+
+  /** Map user-facing interval string to safe SQL literal. Throws on invalid input. */
+  private static toIntervalSql(interval: string): string {
+    const sql = OracleClickHouse.INTERVAL_SQL[interval]
+    if (!sql) throw new Error(`Invalid interval: ${interval}`)
+    return sql
+  }
+
+  /** Map user-facing period string to safe SQL literal. Throws on invalid input. */
+  private static toPeriodSql(period: string): string {
+    const sql = OracleClickHouse.PERIOD_SQL[period]
+    if (!sql) throw new Error(`Invalid period: ${period}`)
+    return sql
+  }
+
+  // ---------------------------------------------------------------------------
+  // Plan 3B: Feed history time-series
+  // ---------------------------------------------------------------------------
+
+  /** Time-series feed values bucketed by interval. */
+  async queryFeedHistory(
+    feedId: string,
+    feedVersion: number,
+    period: string,
+    interval: string,
+  ): Promise<Array<{ timestamp: string; value: string; confidence: number }>> {
+    const periodSql = OracleClickHouse.toPeriodSql(period)
+    const intervalSql = OracleClickHouse.toIntervalSql(interval)
+
+    const result = await this.client.query({
+      query: `
+        SELECT
+          toStartOfInterval(computed_at, ${intervalSql}) AS timestamp,
+          argMax(value_json, computed_at) AS value,
+          argMax(confidence, computed_at) AS confidence
+        FROM published_feed_values
+        WHERE feed_id = {feedId:String}
+          AND feed_version = {feedVersion:UInt16}
+          AND computed_at >= now() - ${periodSql}
+        GROUP BY timestamp
+        ORDER BY timestamp ASC
+      `,
+      query_params: { feedId, feedVersion },
+      format: 'JSONEachRow',
+    })
+    const rows = (await result.json()) as Array<{ timestamp: string; value: string; confidence: string }>
+    return rows.map((r) => ({
+      timestamp: r.timestamp,
+      value: r.value,
+      confidence: Number(r.confidence),
+    }))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Plan 3B: Model usage distribution
+  // ---------------------------------------------------------------------------
+
+  /** LLM model/provider distribution from raw economic events. */
+  async queryModelUsage(
+    period: string,
+    limit: number,
+  ): Promise<{ models: Array<{ model_id: string; provider: string; event_count: number }>; total_events: number }> {
+    const periodSql = OracleClickHouse.toPeriodSql(period)
+
+    const whereClause = `
+      event_type = 'llm_inference'
+      AND event_timestamp >= now() - ${periodSql}
+      AND model_id IS NOT NULL
+      AND model_id != ''
+    `
+
+    // Two queries: top-N models + true total (independent of LIMIT)
+    const [modelsResult, totalResult] = await Promise.all([
+      this.client.query({
+        query: `
+          SELECT model_id, provider, count() AS event_count
+          FROM raw_economic_events
+          WHERE ${whereClause}
+          GROUP BY model_id, provider
+          ORDER BY event_count DESC
+          LIMIT {limit:UInt32}
+        `,
+        query_params: { limit },
+        format: 'JSONEachRow',
+      }),
+      this.client.query({
+        query: `
+          SELECT count() AS total
+          FROM raw_economic_events
+          WHERE ${whereClause}
+        `,
+        format: 'JSONEachRow',
+      }),
+    ])
+
+    const rows = (await modelsResult.json()) as Array<{ model_id: string; provider: string; event_count: string }>
+    const totalRows = (await totalResult.json()) as Array<{ total: string }>
+    const total_events = Number(totalRows[0]?.total ?? 0)
+
+    const models = rows.map((r) => ({
+      model_id: r.model_id,
+      provider: r.provider,
+      event_count: Number(r.event_count),
+    }))
+    return { models, total_events }
+  }
+
   async close(): Promise<void> {
     await this.client.close()
   }

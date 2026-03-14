@@ -22,6 +22,8 @@ import { registerIdentityRoutes, cleanupExpiredChallenges } from './routes/ident
 import { registerAdminRoutes } from './routes/identity-admin.js'
 import { registerAgentRoutes } from './routes/agents.js'
 import { registerProtocolRoutes } from './routes/protocols.js'
+import { registerFeedRoutes } from './routes/feeds.js'
+import { registerReportRoutes } from './routes/reports.js'
 import { LucidResolver } from './services/lucid-resolver.js'
 import { initRedis, closeRedis, loadLeaderboardVersion } from './services/redis.js'
 import { authPlugin } from './plugins/auth.js'
@@ -231,9 +233,11 @@ if (databaseUrl && redpandaBrokers) {
   app.log.info('Auth, rate-limit, and cache plugins registered')
 
   // Plan 3A: Agent + protocol query routes
-  registerAgentRoutes(app, client)
+  registerAgentRoutes(app, client, clickhouse)
   registerProtocolRoutes(app, client)
-  app.log.info('Agent query + protocol routes mounted')
+  registerFeedRoutes(app, clickhouse)
+  registerReportRoutes(app, clickhouse)
+  app.log.info('Agent, protocol, feed, and report routes mounted')
 
   // Plan 4B: Self-registration + admin endpoints
   registerIdentityRoutes(app, client, resolverProducer)

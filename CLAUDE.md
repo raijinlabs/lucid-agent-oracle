@@ -24,6 +24,16 @@ npm run typecheck    # TypeScript check (tsc --noEmit)
 
 Required env for tests: `CURSOR_SECRET=any-secret-value`
 
+### MCP Generation (Plan 3B)
+
+```bash
+npm run dev                     # Start API server
+curl http://localhost:4040/docs/json > openapi.json
+npx tsx scripts/annotate-openapi.ts openapi.json
+speakeasy validate -s openapi.json
+speakeasy generate -s openapi.json -o apps/mcp -t typescript
+```
+
 ## Tech Stack
 
 - **Runtime:** Node.js, TypeScript (ESM, .js extensions in imports)
@@ -70,7 +80,7 @@ All in `services/redis.ts` → `keys` object. Leaderboard uses versioned namespa
 | Plan 3A v2 | Done | API product layer — TypeBox, Swagger, Redis, auth, rate-limit, cursors, RFC 9457 |
 | Plan 4A | Done | External adapters + identity resolution (pluggable registry) |
 | Plan 4B | Done | Self-registration + identity evidence + conflict review |
-| Plan 3B | Planned | MCP tools (5 free + 10+ pro) |
+| Plan 3B | Done (API) | MCP tools — 3 new endpoints + OpenAPI annotations + Speakeasy config (MCP generation pending Task 14) |
 | Plan 3C | Planned | SDK (`@lucidai/oracle` TypeScript client) |
 | Plan 3D | Planned | Dashboard (Next.js in LucidMerged) |
 | Plan 3E | Planned | SSE streaming + webhook alerts |

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import type { DbClient } from '@lucid/oracle-core'
+import type { DbClient, OracleClickHouse } from '@lucid/oracle-core'
 import { AgentQueryService } from '../services/agent-query.js'
 import {
   AgentSearchQuery,
@@ -10,6 +10,8 @@ import {
   AgentMetricsResponse,
   ActivityQuery,
   ActivityResponse,
+  ModelUsageQuery,
+  ModelUsageResponse,
 } from '../schemas/agents.js'
 import {
   AgentIdParams,
@@ -20,7 +22,11 @@ import { requireTier } from '../plugins/auth.js'
 import { encodeCursor, decodeCursor } from '../utils/cursor.js'
 import { keys } from '../services/redis.js'
 
-export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
+export function registerAgentRoutes(
+  app: FastifyInstance,
+  db: DbClient,
+  clickhouse?: OracleClickHouse | null,
+): void {
   const service = new AgentQueryService(db)
 
   // ---- GET /v1/oracle/agents/search (Free) ----
@@ -163,6 +169,64 @@ export function registerAgentRoutes(app: FastifyInstance, db: DbClient): void {
         next_cursor: nextCursor,
         has_more: result.has_more,
         limit,
+      },
+    })
+  })
+
+  // ---- GET /v1/oracle/agents/model-usage (Pro) ----
+  // MUST be registered before /:id to avoid "model-usage" matching as :id param
+  app.get('/v1/oracle/agents/model-usage', {
+    schema: {
+      tags: ['agents'],
+      summary: 'Get model usage distribution',
+      description: 'LLM model/provider distribution across the agent economy. Requires pro tier.',
+      querystring: ModelUsageQuery,
+      security: [{ apiKey: [] }],
+      response: {
+        200: ModelUsageResponse,
+        403: { $ref: 'ProblemDetail' },
+      },
+    },
+    preHandler: [requireTier('pro')],
+    config: {
+      cache: {
+        ttl: 120,
+        key: (request: { query: Record<string, string>; tenant?: { plan: string } }) => {
+          const period = request.query.period ?? '7d'
+          const limit = request.query.limit ?? '20'
+          const plan = request.tenant?.plan ?? 'free'
+          return keys.modelUsage(period, Number(limit), plan)
+        },
+      },
+      rateLimit: { max: 30 },
+    },
+  }, async (request, reply) => {
+    const query = request.query as { period?: string; limit?: number }
+    const period = query.period ?? '7d'
+    const limit = query.limit ?? 20
+
+    // ClickHouse not available → empty data
+    if (!clickhouse) {
+      return reply.send({
+        data: { period, has_data: false, models: [], total_events: 0 },
+      })
+    }
+
+    const result = await clickhouse.queryModelUsage(period, limit)
+
+    const models = result.models.map((m) => ({
+      ...m,
+      pct: result.total_events > 0
+        ? Math.round((m.event_count / result.total_events) * 1000) / 10
+        : 0,
+    }))
+
+    return reply.send({
+      data: {
+        period,
+        has_data: models.length > 0,
+        models,
+        total_events: result.total_events,
       },
     })
   })

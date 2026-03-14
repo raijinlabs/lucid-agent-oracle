@@ -1,0 +1,7 @@
+configVersion: 2.0.0
+generation:
+  sdkClassName: LucidOracle
+  targetLanguage: typescript
+mcpServerOptions:
+  serverName: lucid-oracle-mcp
+  serverVersion: 1.0.0

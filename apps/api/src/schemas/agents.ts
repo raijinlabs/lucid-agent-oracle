@@ -232,3 +232,53 @@ export type ActivityEvent = Static<typeof ActivityEvent>
 export const ActivityResponse = PaginatedList(ActivityEvent, 'ActivityResponse')
 
 export type ActivityResponse = Static<typeof ActivityResponse>
+
+// ---------------------------------------------------------------------------
+// 15. ModelUsageQuery ($id: 'ModelUsageQuery')
+// ---------------------------------------------------------------------------
+
+export const ModelUsageQuery = Type.Object(
+  {
+    period: Type.Optional(
+      Type.Union([
+        Type.Literal('1d'),
+        Type.Literal('7d'),
+        Type.Literal('30d'),
+      ], { default: '7d' }),
+    ),
+    limit: Type.Optional(
+      Type.Integer({ minimum: 1, maximum: 50, default: 20 }),
+    ),
+  },
+  { $id: 'ModelUsageQuery' },
+)
+
+export type ModelUsageQuery = Static<typeof ModelUsageQuery>
+
+// ---------------------------------------------------------------------------
+// 16. ModelUsageEntry (sub-schema, no $id)
+// ---------------------------------------------------------------------------
+
+export const ModelUsageEntry = Type.Object({
+  model_id: Type.String(),
+  provider: Type.String(),
+  event_count: Type.Integer(),
+  pct: Type.Number(),
+})
+
+export type ModelUsageEntry = Static<typeof ModelUsageEntry>
+
+// ---------------------------------------------------------------------------
+// 17. ModelUsageResponse ($id: 'ModelUsageResponse')
+// ---------------------------------------------------------------------------
+
+const ModelUsageData = Type.Object({
+  period: Type.String(),
+  has_data: Type.Boolean(),
+  models: Type.Array(ModelUsageEntry),
+  total_events: Type.Integer(),
+})
+
+export const ModelUsageResponse = DataEnvelope(ModelUsageData, 'ModelUsageResponse')
+
+export type ModelUsageResponse = Static<typeof ModelUsageResponse>
