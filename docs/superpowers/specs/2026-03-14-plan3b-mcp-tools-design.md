@@ -32,6 +32,31 @@ The MCP server is a **separate process** that calls the Oracle API over HTTP. It
 
 Three new endpoints are required before MCP generation. They follow Plan 3A v2 patterns: TypeBox schemas, OpenAPI annotations, Redis cache, rate-limit config, RFC 9457 errors.
 
+**Route file placement:**
+
+- `apps/api/src/routes/feeds.ts` — new file for `feed_history` (feed routes currently live in `v1.ts` but new endpoints should follow the per-domain pattern from agents/protocols)
+- `apps/api/src/routes/reports.ts` — new file for `verify_report`
+- `apps/api/src/routes/agents.ts` — add `model_usage` to the existing agents route file
+
+**ClickHouse access:** Currently only `v1.ts` uses ClickHouse (via startup functions, not injection). The new `feeds.ts` and `agents.ts` routes need direct ClickHouse access. Pattern: `registerFeedRoutes(app, db, clickhouse)` / update `registerAgentRoutes(app, db, clickhouse)` — the `OracleClickHouse` instance is passed from `server.ts` at registration time, same as `db: DbClient`.
+
+**TypeBox schemas:** New schemas go in:
+
+- `apps/api/src/schemas/feeds.ts` — new file: `FeedHistoryQuery`, `FeedHistoryPoint`, `FeedHistoryResponse`
+- `apps/api/src/schemas/reports.ts` — new file: `VerifyReportBody`, `VerifyReportResponse`
+- `apps/api/src/schemas/agents.ts` — add: `ModelUsageQuery`, `ModelUsageEntry`, `ModelUsageResponse`
+
+All schemas follow existing patterns: TypeBox `Type.Object()` with `$id`, `Static<typeof Schema>` for TS types.
+
+**Redis key builders:** Add to `apps/api/src/services/redis.ts` → `keys` object:
+
+```typescript
+feedHistory: (feedId: string, period: string, interval: string, plan: string) =>
+  `oracle:feed:history:${feedId}:${period}:${interval}:${plan}`,
+modelUsage: (period: string, limit: number, plan: string) =>
+  `oracle:model-usage:${period}:${limit}:${plan}`,
+```
+
 ### 3.1 GET /v1/oracle/feeds/:id/history
 
 **Purpose:** Time-series feed values from ClickHouse.
@@ -67,20 +92,40 @@ Three new endpoints are required before MCP generation. They follow Plan 3A v2 p
 
 **Empty result:** `has_data: false`, `points: []`. Not an error — 200 with empty data.
 
+**feed_version:** Sourced from `V1_FEEDS[feedId].version` (currently all feeds are version 1). The route validates `feedId` against `V1_FEEDS` keys — invalid IDs return 404.
+
 **ClickHouse query:**
+
+⚠️ **CRITICAL: Interval/period safety.** ClickHouse `toStartOfInterval` and `INTERVAL` require literal SQL interval expressions — they cannot be parameterized via `{param:Type}` bindings. The route handler MUST:
+
+1. Whitelist allowed values: `interval` ∈ `{'1m' → 'INTERVAL 1 MINUTE', '1h' → 'INTERVAL 1 HOUR', '1d' → 'INTERVAL 1 DAY'}`, `period` ∈ `{'1d' → 'INTERVAL 1 DAY', '7d' → 'INTERVAL 7 DAY', '30d' → 'INTERVAL 30 DAY', '90d' → 'INTERVAL 90 DAY'}`
+2. Map user input to SQL literals via a const lookup object (not string concatenation from user input)
+3. Interpolate the mapped SQL literal into the query string
+
+```typescript
+const INTERVAL_SQL: Record<string, string> = {
+  '1m': 'INTERVAL 1 MINUTE', '1h': 'INTERVAL 1 HOUR', '1d': 'INTERVAL 1 DAY',
+}
+const PERIOD_SQL: Record<string, string> = {
+  '1d': 'INTERVAL 1 DAY', '7d': 'INTERVAL 7 DAY',
+  '30d': 'INTERVAL 30 DAY', '90d': 'INTERVAL 90 DAY',
+}
+```
 
 ```sql
 SELECT
-  toStartOfInterval(computed_at, INTERVAL {interval}) AS timestamp,
+  toStartOfInterval(computed_at, ${intervalSql}) AS timestamp,
   argMax(value_json, computed_at) AS value,
   argMax(confidence, computed_at) AS confidence
 FROM published_feed_values
-WHERE feed_id = {feed_id}
-  AND feed_version = {version}
-  AND computed_at >= now() - INTERVAL {period}
+WHERE feed_id = {feedId:String}
+  AND feed_version = {feedVersion:UInt16}
+  AND computed_at >= now() - ${periodSql}
 GROUP BY timestamp
 ORDER BY timestamp ASC
 ```
+
+Where `${intervalSql}` and `${periodSql}` are the whitelisted SQL literals (safe interpolation), and `feedId`/`feedVersion` use ClickHouse parameterized binding (matching existing `queryLatestPublishedValue` pattern in `packages/core/src/clients/clickhouse.ts`).
 
 Uses `argMax` to pick the latest value within each interval bucket, avoiding duplicates from revisions.
 
@@ -131,6 +176,8 @@ Uses `argMax` to pick the latest value within each interval bucket, avoiding dup
 
 **ClickHouse query:**
 
+⚠️ Same interval safety as feed_history — `period` must be whitelisted and interpolated as a SQL literal, not parameterized. `limit` can use ClickHouse parameterized binding (`{limit:UInt32}`).
+
 ```sql
 SELECT
   model_id,
@@ -138,12 +185,12 @@ SELECT
   count() AS event_count
 FROM raw_economic_events
 WHERE event_type = 'llm_inference'
-  AND event_timestamp >= now() - INTERVAL {period}
+  AND event_timestamp >= now() - ${periodSql}
   AND model_id IS NOT NULL
   AND model_id != ''
 GROUP BY model_id, provider
 ORDER BY event_count DESC
-LIMIT {limit}
+LIMIT {limit:UInt32}
 ```
 
 `pct` is computed application-side from `event_count / total_events * 100`, rounded to 1 decimal.
@@ -203,7 +250,7 @@ The `report` field accepts the full signed report envelope as produced by `Attes
 
 1. **Signature check:** Use `AttestationService.verify()` from `oracle-core` to verify Ed25519 signature against the canonical JSON payload.
 2. **Payload integrity:** Recompute canonical JSON hash of the report body (excluding signature fields) and compare against `computation_hash`.
-3. **Publication lookup:** If the report contains a `feed_id` + `computed_at`, query `published_feed_values` in ClickHouse for matching `published_solana` / `published_base` tx hashes. Return null if no on-chain publication found. **No live RPC calls** — this is a lookup against stored state only.
+3. **Publication lookup:** If the report contains a `feed_id` + `computed_at`, query `published_feed_values` in ClickHouse for matching `published_solana` / `published_base` columns (both `String | null` — see `PublishedFeedRow` in `packages/core/src/clients/clickhouse.ts`). These store tx hashes as strings, not booleans. Return null if no on-chain publication found. **No live RPC calls** — this is a lookup against stored state only. Can reuse the existing `OracleClickHouse.queryPublicationStatus()` method.
 
 **Errors:**
 - 400: Invalid report format (missing required fields)
@@ -238,7 +285,21 @@ Tools 2, 5, and 7 combine multiple API endpoints into a single tool invocation. 
 - **`oracle_protocol_stats`**: When given a protocol ID, calls detail endpoint. Without ID, calls list endpoint.
 - **`oracle_agent_deep_metrics`**: Calls metrics + activity (first page), returns combined result
 
-### 4.3 Excluded Endpoints
+### 4.3 Tool Count Note
+
+The master Oracle spec (Plan 1) described "5 free + 10+ pro" tools for the full MCP surface. This first MCP release ships **6 free + 3 pro = 9 tools** — a curated subset. The extra free tool vs the original plan is `oracle_verify_report`, added because verification is a trust feature that should be accessible to all tiers. Future waves will add more pro tools as described in Section 8.
+
+### 4.4 Existing Route Annotations (v1.ts)
+
+The existing feed routes in `v1.ts` (`GET /feeds`, `GET /feeds/:id`, `GET /feeds/:id/methodology`, `GET /reports/latest`) need `x-speakeasy-mcp` annotations added to their schemas. Currently these routes have minimal schema definitions. Plan 3B adds:
+
+- OpenAPI `tags`, `summary`, `description` to all feed/report routes in `v1.ts`
+- `x-speakeasy-mcp` tool annotations for included routes
+- `x-speakeasy-mcp: { disabled: true }` for excluded routes (`/reports/latest`)
+
+This is annotation-only work — no handler logic changes.
+
+### 4.5 Excluded Endpoints
 
 | Endpoint | Reason |
 |----------|--------|
@@ -247,7 +308,7 @@ Tools 2, 5, and 7 combine multiple API endpoints into a single tool invocation. 
 | `GET /health` | Infrastructure |
 | Identity/admin routes | Internal |
 
-### 4.4 OpenAPI Annotations
+### 4.6 OpenAPI Annotations
 
 Tools are annotated in the Fastify route schemas using Speakeasy extensions:
 
@@ -269,6 +330,10 @@ schema: {
 ```
 
 If TypeBox `extensions` don't propagate cleanly to the Swagger output, a post-processing step on the exported `openapi.json` adds the annotations before Speakeasy generation.
+
+### 4.7 Composite Tool Fallback
+
+Speakeasy's `x-speakeasy-mcp` composite tool grouping (multiple operations under one tool name) is documented but may have limitations. **Fallback:** If Speakeasy doesn't support compositing natively, implement composite tools as thin wrappers in a `apps/mcp/src/overrides/` directory that call multiple generated SDK methods and merge results. The generated server structure should allow this extension without forking. Verify composite support during the Speakeasy validation step (Section 5.1) — if it fails, switch to the wrapper approach before proceeding.
 
 ## 5. Speakeasy Integration
 
