@@ -63,19 +63,20 @@ const TOOL_ANNOTATIONS: Record<string, { method: string; tool: Record<string, un
 }
 
 // Explicitly disabled endpoints (exclude from MCP)
-const DISABLED_PATHS: Record<string, string> = {
-  '/v1/oracle/reports/latest': 'get',
-  '/v1/oracle/agents/leaderboard': 'get',
-  '/v1/oracle/protocols/{id}/metrics': 'get',
-  '/health': 'get',
+// Uses tuples to support multiple methods on the same path
+const DISABLED_ENTRIES: Array<{ path: string; method: string }> = [
+  { path: '/v1/oracle/reports/latest', method: 'get' },
+  { path: '/v1/oracle/agents/leaderboard', method: 'get' },
+  { path: '/v1/oracle/protocols/{id}/metrics', method: 'get' },
+  { path: '/health', method: 'get' },
   // Identity/admin routes — internal, must not become MCP tools
-  '/v1/oracle/agents/challenge': 'post',
-  '/v1/oracle/agents/register': 'post',
-  '/v1/internal/identity/conflicts': 'get',
-  '/v1/internal/identity/conflicts/{id}': 'get',
-  '/v1/internal/identity/conflicts/{id}': 'patch',
-  '/v1/internal/identity/resolve-lucid': 'post',
-}
+  { path: '/v1/oracle/agents/challenge', method: 'post' },
+  { path: '/v1/oracle/agents/register', method: 'post' },
+  { path: '/v1/internal/identity/conflicts', method: 'get' },
+  { path: '/v1/internal/identity/conflicts/{id}', method: 'get' },
+  { path: '/v1/internal/identity/conflicts/{id}', method: 'patch' },
+  { path: '/v1/internal/identity/resolve-lucid', method: 'post' },
+]
 
 const specPath = process.argv[2] ?? 'openapi.json'
 const spec = JSON.parse(readFileSync(specPath, 'utf-8')) as OpenAPISpec
@@ -93,7 +94,7 @@ for (const [path, config] of Object.entries(TOOL_ANNOTATIONS)) {
 }
 
 // Disable explicitly listed endpoints
-for (const [path, method] of Object.entries(DISABLED_PATHS)) {
+for (const { path, method } of DISABLED_ENTRIES) {
   const pathObj = spec.paths[path]
   if (pathObj?.[method]) {
     pathObj[method]['x-speakeasy-mcp'] = { disabled: true }
@@ -103,7 +104,7 @@ for (const [path, method] of Object.entries(DISABLED_PATHS)) {
 // Disable any remaining unannotated endpoints (catch-all for future routes)
 const annotatedPaths = new Set([
   ...Object.keys(TOOL_ANNOTATIONS),
-  ...Object.keys(DISABLED_PATHS),
+  ...DISABLED_ENTRIES.map((e) => e.path),
 ])
 for (const [path, methods] of Object.entries(spec.paths)) {
   for (const [method, operation] of Object.entries(methods)) {
