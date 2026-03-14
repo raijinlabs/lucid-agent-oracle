@@ -47,6 +47,10 @@ export const keys = {
   protocolList: () => `oracle:protocols`,
   protocolDetail: (id: string) => `oracle:protocol:${id}`,
   protocolMetrics: (id: string, plan: string) => `oracle:protocol:metrics:${id}:${plan}`,
+  feedHistory: (feedId: string, period: string, interval: string, plan: string) =>
+    `oracle:feed:history:${feedId}:${period}:${interval}:${plan}`,
+  modelUsage: (period: string, limit: number, plan: string) =>
+    `oracle:model-usage:${period}:${limit}:${plan}`,
 }
 
 /**
