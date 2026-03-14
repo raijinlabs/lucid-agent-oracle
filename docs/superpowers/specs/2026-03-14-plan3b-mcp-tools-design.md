@@ -216,20 +216,25 @@ LIMIT {limit:UInt32}
 
 **Request body:**
 
+The `report` field accepts the full signed report envelope as produced by `AttestationService.signReport()` (see `packages/core/src/services/attestation-service.ts`). The shape matches `ReportEnvelope`:
+
 ```json
 {
   "report": {
-    "feeds": [ ... ],
-    "computed_at": "2026-03-13T00:00:00Z",
-    "signer": "base64-pubkey",
-    "signature": "base64-sig",
+    "feed_id": "aegdp",
+    "feed_version": 1,
+    "report_timestamp": 1741824000000,
+    "values": { "value_usd": 12345.67 },
     "input_manifest_hash": "sha256hex",
-    "computation_hash": "sha256hex"
+    "computation_hash": "sha256hex",
+    "revision": 0,
+    "signer_set_id": "ss_lucid_v1",
+    "signatures": [
+      { "signer": "hex-pubkey", "sig": "hex-sig" }
+    ]
   }
 }
 ```
-
-The `report` field accepts the full signed report envelope as produced by `AttestationService.sign()`.
 
 **Response (200):**
 
@@ -240,10 +245,11 @@ The `report` field accepts the full signed report envelope as produced by `Attes
     "checks": {
       "signature": "pass",
       "payload_integrity": "pass",
-      "signer": "base64-pubkey"
+      "signer_set_id": "ss_lucid_v1",
+      "signers": ["hex-pubkey"]
     },
     "publication": {
-      "solana_tx": "abc123..." ,
+      "solana_tx": "abc123...",
       "base_tx": null
     }
   }
@@ -252,8 +258,8 @@ The `report` field accepts the full signed report envelope as produced by `Attes
 
 **Verification steps:**
 
-1. **Signature check:** Use `AttestationService.verify()` from `oracle-core` to verify Ed25519 signature against the canonical JSON payload.
-2. **Payload integrity:** Recompute canonical JSON hash of the report body (excluding signature fields) and compare against `computation_hash`.
+1. **Signature check:** Use `AttestationService.verifyReport(envelope)` from `oracle-core` to verify Ed25519 signatures against the canonical JSON payload. The method strips `signer_set_id` and `signatures` from the envelope, canonicalizes the remaining `ReportPayload`, and verifies each signature.
+2. **Payload integrity:** Recompute canonical JSON hash of the `ReportPayload` fields (excluding `signer_set_id` and `signatures`) and compare against `computation_hash`.
 3. **Publication lookup:** If the report contains feed entries with `feed_id` + `computed_at`, look up on-chain publication status from `published_feed_values` in ClickHouse. Columns `published_solana` / `published_base` are both `String | null` — see `PublishedFeedRow` in `packages/core/src/clients/clickhouse.ts`. Return null if no on-chain publication found. **No live RPC calls** — this is a lookup against stored state only. The existing `OracleClickHouse.queryPublicationStatus(feedId, feedVersion, computedAt, revision)` method can be reused — source `feedVersion` from `V1_FEEDS[feedId].version` and default `revision` to `0` (first revision). If the report contains multiple feeds, iterate and collect all publication statuses.
 
 **Errors:**
