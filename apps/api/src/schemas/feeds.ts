@@ -60,3 +60,78 @@ const FeedHistoryData = Type.Object({
 export const FeedHistoryResponse = DataEnvelope(FeedHistoryData, 'FeedHistoryResponse')
 
 export type FeedHistoryResponse = Static<typeof FeedHistoryResponse>
+
+// ---------------------------------------------------------------------------
+// V1 existing route schemas (needed for OpenAPI completeness → Speakeasy)
+// ---------------------------------------------------------------------------
+
+const FeedValuePublic = Type.Object({
+  feed_id: Type.String(),
+  value: Type.String(),
+  confidence: Type.Number(),
+  completeness: Type.Number(),
+  freshness_ms: Type.Integer(),
+  staleness_risk: Type.String(),
+  computed_at: Type.String(),
+  signer: Type.String(),
+  signature: Type.String(),
+})
+
+const FeedDefPublic = Type.Object({
+  id: Type.String(),
+  name: Type.String(),
+  description: Type.String(),
+  version: Type.Integer(),
+  methodology_url: Type.String(),
+  update_interval_ms: Type.Integer(),
+  deviation_threshold_bps: Type.Integer(),
+  latest_value: Type.Union([FeedValuePublic, Type.Null()]),
+})
+
+export const FeedListResponse = Type.Object(
+  { feeds: Type.Array(FeedDefPublic) },
+  { $id: 'FeedListResponse' },
+)
+
+export const FeedDetailResponse = Type.Object(
+  {
+    feed: Type.Object({
+      id: Type.String(),
+      name: Type.String(),
+      description: Type.String(),
+      version: Type.Integer(),
+      methodology_url: Type.String(),
+    }),
+    latest: Type.Union([FeedValuePublic, Type.Null()]),
+    methodology_url: Type.String(),
+  },
+  { $id: 'FeedDetailResponse' },
+)
+
+export const FeedMethodologyResponse = Type.Object(
+  {
+    feed_id: Type.String(),
+    version: Type.Integer(),
+    name: Type.String(),
+    description: Type.String(),
+    update_interval_ms: Type.Integer(),
+    deviation_threshold_bps: Type.Integer(),
+    confidence_formula: Type.Object({
+      version: Type.Integer(),
+      weights: Type.Record(Type.String(), Type.Number()),
+    }),
+    computation: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    canonical_json_version: Type.Optional(Type.String()),
+  },
+  { $id: 'FeedMethodologyResponse' },
+)
+
+export const ReportLatestResponse = Type.Object(
+  {
+    report: Type.Union([
+      Type.Object({ feeds: Type.Array(FeedValuePublic) }),
+      Type.Null(),
+    ]),
+  },
+  { $id: 'ReportLatestResponse' },
+)

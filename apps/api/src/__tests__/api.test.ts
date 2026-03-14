@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import Fastify from 'fastify'
 import { registerOracleRoutes, _resetFeedValues, handleIndexUpdate } from '../routes/v1.js'
+import { ProblemDetail } from '../schemas/common.js'
 
 describe('Oracle Economy API', () => {
   const app = Fastify()
 
   beforeAll(async () => {
+    app.addSchema(ProblemDetail)
     registerOracleRoutes(app)
     await app.ready()
   })
