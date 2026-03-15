@@ -104,23 +104,24 @@ src/lib/oracle/
 Extend `src/middleware.ts` to detect `oracle.lucid.foundation`:
 
 ```typescript
-const oracleDomains = ['oracle.lucid.foundation', 'oracle.localhost:3000']
-if (oracleDomains.some(d => hostname.includes(d))) {
+// Exact host match — not hostname.includes() — to avoid accidental subdomain collisions
+const ORACLE_HOSTS = new Set(['oracle.lucid.foundation', 'oracle.localhost:3000'])
+if (ORACLE_HOSTS.has(hostname)) {
   const oraclePath = `/oracle${pathname === '/' ? '' : pathname}`
   return NextResponse.rewrite(new URL(oraclePath, req.url))
 }
 ```
 
-Additionally, add all oracle paths to the `publicRoutes` array in middleware so unauthenticated users can access oracle pages via direct path (`/oracle/...`) without being redirected to login:
+Additionally, add a **prefix-based** public route check so all oracle paths (including deep links like `/oracle/feeds/[id]`, `/oracle/agents/[id]`, `/oracle/protocols/[id]`) are accessible without login:
 
 ```typescript
-// In publicRoutes array:
-'/oracle',
-'/oracle/feeds',
-'/oracle/agents',
-'/oracle/protocols',
-'/oracle/reports',
+// In the public route check (before auth redirect):
+if (pathname.startsWith('/oracle')) {
+  return NextResponse.next()
+}
 ```
+
+This is simpler and more robust than enumerating individual paths. The entire oracle route group is public by default — pro-tier gating happens at the component level via `<ProGate>`, not at the middleware level.
 
 This ensures "public by default" works regardless of whether the user arrives via `oracle.lucid.foundation` (domain rewrite) or `localhost:3000/oracle/...` (direct path).
 
@@ -162,28 +163,41 @@ export function useOracleClient(): LucidOracle {
 
 ### Cache Keys
 
-Defined in `src/lib/oracle/cache-keys.ts`. All hooks use these as `cacheKey` for `useQueryWithCache`:
+Defined in `src/lib/oracle/cache-keys.ts` as **builder functions** that produce parameterized `queryKey` arrays. This prevents collisions when the same hook type is used with different IDs, filters, or pagination cursors.
 
 ```typescript
-export const ORACLE_CACHE_KEYS = {
-  FEEDS: 'oracle_feeds',
-  FEED_DETAIL: 'oracle_feed_detail',
-  FEED_HISTORY: 'oracle_feed_history',
-  FEED_METHODOLOGY: 'oracle_feed_methodology',
-  AGENT_SEARCH: 'oracle_agent_search',
-  AGENT_LEADERBOARD: 'oracle_agent_leaderboard',
-  AGENT_PROFILE: 'oracle_agent_profile',
-  AGENT_METRICS: 'oracle_agent_metrics',
-  AGENT_ACTIVITY: 'oracle_agent_activity',
-  MODEL_USAGE: 'oracle_model_usage',
-  PROTOCOLS: 'oracle_protocols',
-  PROTOCOL_DETAIL: 'oracle_protocol_detail',
-  PROTOCOL_METRICS: 'oracle_protocol_metrics',
-  LATEST_REPORT: 'oracle_latest_report',
+// Cache key prefix for invalidation scoping
+const P = 'oracle' as const;
+
+// Builder functions — each returns a unique queryKey array
+export const oracleKeys = {
+  // Feeds
+  feeds:              ()                              => [P, 'feeds'] as const,
+  feedDetail:         (id: string)                    => [P, 'feeds', id] as const,
+  feedHistory:        (id: string, period: string, interval: string) =>
+                                                         [P, 'feeds', id, 'history', period, interval] as const,
+  feedMethodology:    (id: string)                    => [P, 'feeds', id, 'methodology'] as const,
+
+  // Agents
+  agentSearch:        (q: string)                     => [P, 'agents', 'search', q] as const,
+  agentLeaderboard:   (sort?: string, cursor?: string) =>
+                                                         [P, 'agents', 'leaderboard', sort, cursor] as const,
+  agentProfile:       (id: string)                    => [P, 'agents', id] as const,
+  agentMetrics:       (id: string)                    => [P, 'agents', id, 'metrics'] as const,
+  agentActivity:      (id: string, cursor?: string)   => [P, 'agents', id, 'activity', cursor] as const,
+  modelUsage:         (period: string)                => [P, 'agents', 'model-usage', period] as const,
+
+  // Protocols
+  protocols:          ()                              => [P, 'protocols'] as const,
+  protocolDetail:     (id: string)                    => [P, 'protocols', id] as const,
+  protocolMetrics:    (id: string)                    => [P, 'protocols', id, 'metrics'] as const,
+
+  // Reports
+  latestReport:       ()                              => [P, 'reports', 'latest'] as const,
 } as const;
 ```
 
-These work with the existing `CacheKey` type (accepts `string`). Per-hook `staleTime` overrides are sufficient — no changes to the global cache config needed.
+Hooks use these builders for both `cacheKey` (string prefix for `useQueryWithCache`) and `queryKey` (full parameterized array for React Query). Example: `useAgentProfile('abc')` → queryKey `['oracle', 'agents', 'abc']`. No two different agents can share a cache entry.
 
 ### React Query Hooks
 
@@ -215,7 +229,7 @@ Phase 2 (Plan 3E): Add SSE EventSource in `OracleDataProvider` that pushes updat
 
 ### Home (`/` on oracle domain)
 
-1. **Stats ticker** (fixed below nav): Scrolling marquee with LAEI, APRI, AEGDP values + 24h deltas. Green pulsing "LIVE" dot. 30s auto-refresh.
+1. **Stats ticker** (fixed below nav): Scrolling marquee with AAI, APRI, AEGDP values + 24h deltas. Green pulsing "LIVE" dot. 30s auto-refresh.
 2. **Feed hero**: Three large feed cards — current value (large type), confidence bar, 24h sparkline (TradingView mini), staleness dot (green/yellow/red), link to detail.
 3. **Global stats row**: 4 metric boxes — Total Agents, Total Protocols, Active Feeds, Last Report timestamp.
 4. **Leaderboard preview**: Top 5 agents table (rank, name, wallet count, protocol count, reputation). "View Full Leaderboard →" link.
@@ -263,6 +277,8 @@ Protocol cards grid: name, chain badges, status indicator, agent count, wallet c
   3. Calls `reports.verify({ ...mappedReport })`
   4. Displays pass/fail badges for signature check, payload integrity, and publication status with clickable Solana/Base TX links
 
+  **Boundary note:** The snake_case → camelCase mapping is the one place where the dashboard has format-aware logic rather than pure SDK pass-through. This mapping should be a single utility function in `lib/oracle/` (e.g., `mapWireReportToSdk()`) so it can be tested independently and updated if the wire format or SDK type shape changes. The verifier component itself should only call the mapper and the SDK — no inline field remapping.
+
 ## Navigation & Chrome
 
 **Oracle nav bar** — distinct from LucidMerged main nav, using shared UI components:
@@ -272,15 +288,15 @@ Protocol cards grid: name, chain badges, status indicator, agent count, wallet c
 - **Mobile**: Hamburger → slide-down menu (launchpad pattern)
 - **Glass morphism**: `backdrop-blur-xl bg-ink-900/80 border-b border-white/5`
 
-**Stats ticker** — fixed below nav, same mechanical pattern as launchpad's StatsTicker but showing LAEI, APRI, AEGDP values with 24h deltas.
+**Stats ticker** — fixed below nav, same mechanical pattern as launchpad's StatsTicker but showing AAI, APRI, AEGDP values with 24h deltas.
 
 ## Authentication
 
 - **Public by default**: All free-tier pages render fully without login.
 - **Pro unlock flow**: ProGate overlay → two options:
-  1. "Sign in" → Privy auth (existing) → API key from `gateway_tenants` record
-  2. "Enter API key" → settings panel, key stored in localStorage
-- **Auth integration**: `useOracleClient()` checks auth context for API key, falls back to anonymous SDK instance.
+  1. "Sign in" → Privy auth (existing) → API key from `gateway_tenants` record (preferred — HttpOnly session-backed)
+  2. "Enter API key manually" → settings panel, key stored in localStorage. **Conscious tradeoff:** localStorage is readable by any JS on the page and is not as strong as an HttpOnly-backed session model. This is acceptable for a v1 convenience feature because (a) the API key grants read-only access to pro-tier data, not write access, and (b) the primary auth path is Privy sign-in. If the dashboard later handles sensitive write operations, this should be revisited.
+- **Auth integration**: `useOracleClient()` checks auth context for API key (Privy-derived first, localStorage fallback second), falls back to anonymous SDK instance.
 - **No new auth system** — reuses existing Privy + Supabase.
 
 ## Charting
@@ -347,6 +363,16 @@ Server layout gates on `FEATURES.oracleDashboard` — redirects to `/` when disa
 - **SDK 403 errors**: Pro-gated hooks catch 403 and render the `<ProGate>` overlay instead of an error state.
 - **SDK 429 errors**: Rate limit errors show a toast via Sonner with retry-after countdown.
 - **Network failures**: React Query's built-in retry (3 attempts, 1s delay) handles transient failures. After exhaustion, inline error state with "Retry" button.
+- **Retry suppression for deterministic errors**: All oracle hooks configure React Query's `retry` option to skip retries on 400, 403, and 404 status codes. These are deterministic — retrying will not change the outcome and would make the UX feel sluggish. Only 5xx and network errors should retry.
+
+```typescript
+// Shared retry config for all oracle hooks
+const oracleRetry = (failureCount: number, error: unknown) => {
+  const status = (error as any)?.statusCode ?? (error as any)?.status;
+  if (status && status >= 400 && status < 500) return false; // no retry on 4xx
+  return failureCount < 3;
+};
+```
 - **Loading states**: Every route has `loading.tsx` with skeleton shimmer. TradingView chart shows a pulsing placeholder rectangle while data loads. Leaderboard table shows shimmer rows.
 
 ## Non-Goals
