@@ -33,6 +33,23 @@ speakeasy lint openapi --schema openapi.json                          # Validate
 speakeasy generate sdk --lang mcp-typescript --schema openapi.json --out apps/mcp -y  # Generate MCP server
 ```
 
+### SDK Generation (Plan 3C)
+
+```bash
+# SDK repo: lucid-fdn/oracle-sdk-node (separate public repo)
+# npm: @lucid-fdn/oracle
+
+# Re-generate after spec changes:
+./scripts/sync-sdk-spec.sh              # Export spec + copy to SDK repo (validates 15 endpoints)
+cd ../oracle-sdk-node
+speakeasy run                            # Regenerate SDK
+npx tsx tests/verify-surface.ts          # Verify all 15 methods present
+npm run test:ci                          # Run CI sanity tests
+npm publish --access public              # Publish update
+```
+
+**Method name stability:** The overlay (`openapi/overlay.yaml`) must be kept in sync with the API spec on every SDK release. If an API path is renamed or removed without updating the overlay's JSONPath target, `speakeasy run` will silently drop the method from the SDK. Always verify that the generated SDK has all 15 methods after regeneration.
+
 ## Tech Stack
 
 - **Runtime:** Node.js, TypeScript (ESM, .js extensions in imports)
@@ -80,7 +97,7 @@ All in `services/redis.ts` → `keys` object. Leaderboard uses versioned namespa
 | Plan 4A | Done | External adapters + identity resolution (pluggable registry) |
 | Plan 4B | Done | Self-registration + identity evidence + conflict review |
 | Plan 3B | Done | MCP tools — 3 new endpoints + OpenAPI annotations + Speakeasy MCP server (12 tools) |
-| Plan 3C | Planned | SDK (`@lucidai/oracle` TypeScript client) |
+| Plan 3C | Done | SDK (`@lucid-fdn/oracle` TypeScript client, overlay-driven Speakeasy generation) |
 | Plan 3D | Planned | Dashboard (Next.js in LucidMerged) |
 | Plan 3E | Planned | SSE streaming + webhook alerts |
 
