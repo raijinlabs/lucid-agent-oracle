@@ -394,6 +394,15 @@ const oracleRetry = (failureCount: number, error: unknown) => {
 ```
 - **Loading states**: Every route has `loading.tsx` with skeleton shimmer. TradingView chart shows a pulsing placeholder rectangle while data loads. Leaderboard table shows shimmer rows.
 
+## Conscious v1 Tradeoffs
+
+**Client-rendered by design, not by accident.** The v1 dashboard is heavily `'use client'` — all pages fetch data via React Query hooks in the browser, with no server-side rendering of API data. This is a deliberate tradeoff for speed of implementation:
+
+- **What we give up:** SSR, SEO indexing of feed/agent data, faster first contentful paint (server-rendered HTML).
+- **What we gain:** Simpler architecture (one data-fetching pattern everywhere), real-time polling via `refetchInterval`, instant client-side navigation between pages, and a clean SSE upgrade path (Plan 3E replaces polling in the provider, not in every page).
+- **Why it's acceptable for v1:** The primary audience (protocol teams, token launchers) reaches the dashboard via direct links or bookmarks, not search engines. The data changes every 30 seconds, so SSR content would be stale by the time it's crawled.
+- **Path to v2:** When SEO matters (public agent profiles, feed pages as canonical URLs), introduce RSC data-fetching on key pages (feed detail, agent detail) using the SDK's server-side methods. The SDK already works in Node.js — no refactoring needed, just moving the fetch call from a hook to a server component and passing data as props. The route group structure supports this without changes.
+
 ## Non-Goals
 
 - No admin/conflict resolution UI (stays in internal tooling)
