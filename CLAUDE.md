@@ -79,7 +79,7 @@ All in `services/redis.ts` → `keys` object. Leaderboard uses versioned namespa
 | Plan 3A v2 | Done | API product layer — TypeBox, Swagger, Redis, auth, rate-limit, cursors, RFC 9457 |
 | Plan 4A | Done | External adapters + identity resolution (pluggable registry) |
 | Plan 4B | Done | Self-registration + identity evidence + conflict review |
-| Plan 3B | Done (API) | MCP tools — 3 new endpoints + OpenAPI annotations + Speakeasy config (MCP generation pending Task 14) |
+| Plan 3B | Done | MCP tools — 3 new endpoints + OpenAPI annotations + Speakeasy MCP server (12 tools) |
 | Plan 3C | Planned | SDK (`@lucidai/oracle` TypeScript client) |
 | Plan 3D | Planned | Dashboard (Next.js in LucidMerged) |
 | Plan 3E | Planned | SSE streaming + webhook alerts |
