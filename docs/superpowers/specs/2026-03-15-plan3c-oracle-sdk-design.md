@@ -40,12 +40,12 @@ The OpenAPI spec originates in the oracle monorepo. The SDK repo consumes it.
 CURSOR_SECRET=test npx tsx scripts/export-openapi.ts > openapi.json
 ```
 
-This exports the full 15-endpoint spec without needing a running database (uses stub DB for route registration).
+This exports the full 15-endpoint spec without needing a running database (uses stub DB for route registration). The overlay sets the production server URL, so the export script's default `localhost:4040` is overridden.
 
 **In the SDK repo (`oracle-sdk-node`):**
 ```bash
 # Copy spec from oracle monorepo (or CI fetches it)
-cp ../lucid-agent-oracle/openapi.json openapi/openapi.yaml
+cp ../lucid-agent-oracle/openapi.json openapi/openapi.json
 
 # Generate SDK (overlay applied automatically via workflow.yaml)
 speakeasy run
@@ -57,7 +57,7 @@ speakeasy run
 
 | Oracle monorepo | SDK repo |
 |-----------------|----------|
-| `scripts/export-openapi.ts` — spec export | `openapi/openapi.yaml` — spec copy |
+| `scripts/export-openapi.ts` — spec export | `openapi/openapi.json` — spec copy |
 | `scripts/annotate-openapi.ts` — MCP annotations only | `openapi/overlay.yaml` — SDK naming/grouping |
 | API source of truth | SDK source of truth |
 | `apps/mcp/` — MCP server (separate Speakeasy target) | `src/` — generated SDK |
@@ -145,9 +145,14 @@ actions:
       x-speakeasy-name-override: verify
 
   # --- Hide non-public ---
-  - target: $.paths["/health"]
+  - target: $.paths["/health"].get
     update:
       x-speakeasy-ignore: true
+
+  # --- Server URL override ---
+  - target: $.servers[0]
+    update:
+      url: https://api.lucid.foundation
 ```
 
 Identity and admin routes (`/v1/oracle/agents/challenge`, `/v1/oracle/agents/register`, `/v1/internal/*`) are already excluded by the `export-openapi.ts` script which only registers public routes.
@@ -168,8 +173,10 @@ typescript:
 
 Key settings:
 - **`sdkClassName: LucidOracle`** — the main class name
-- **`envVarPrefix: LUCID_ORACLE`** — SDK auto-reads `LUCID_ORACLE_API_KEY` from env
+- **`envVarPrefix: LUCID_ORACLE`** — SDK auto-reads `LUCID_ORACLE_API_KEY` from env (derived from scheme name `apiKey` + prefix)
 - **`packageName: @lucid-fdn/oracle`** — npm package identity
+
+> **Note:** This is a seed configuration. `speakeasy run` will expand it with additional fields (fixes, usageSnippets, responseFormat, etc.) on first generation. The monorepo-root `speakeasy.yaml` is for the MCP target only and is unrelated to this config.
 
 ### 3.3 workflow.yaml (`.speakeasy/workflow.yaml`)
 
@@ -178,7 +185,7 @@ workflowVersion: 1.0.0
 sources:
   oracle-api:
     inputs:
-      - location: openapi/openapi.yaml
+      - location: openapi/openapi.json
     overlays:
       - location: openapi/overlay.yaml
 targets:
@@ -298,15 +305,14 @@ Auto-pagination via `x-speakeasy-pagination` can be added in a future overlay up
 ### 5.1 What Gets Built
 
 **In the oracle monorepo (`lucid-agent-oracle`):**
-1. Update `scripts/export-openapi.ts` to also output YAML format (Speakeasy prefers YAML)
-2. Ensure the exported spec has correct `servers[0].url` set to `https://api.lucid.foundation`
+1. No changes needed — `export-openapi.ts` already exports JSON, and the overlay overrides the server URL
 
 **In the SDK repo (`oracle-sdk-node`):**
 1. Create the repo structure: `openapi/`, `.speakeasy/`, `LICENSE`, `.gitignore`
 2. Write `openapi/overlay.yaml` with all 15 endpoint mappings
 3. Write `.speakeasy/gen.yaml` with package config
 4. Write `.speakeasy/workflow.yaml` for the generation pipeline
-5. Copy the exported OpenAPI spec to `openapi/openapi.yaml`
+5. Copy the exported OpenAPI spec to `openapi/openapi.json`
 6. Run `speakeasy run` to generate the SDK
 7. Verify generation succeeds and types are correct
 8. Write a README with usage examples
