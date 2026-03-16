@@ -29,6 +29,13 @@ Webhook worker (apps/webhook-worker/)
 - **Separate webhook worker process** (`apps/webhook-worker/`) — delivery infra is a different workload from API serving and feed computation
 - **No SSE replay in v1** — on reconnect, clients refresh state via REST. Event IDs emitted for forward compatibility.
 
+**Deviations from master spec (intentional):**
+- Master spec (Section 20.3) envisions a dedicated `sse-fanout` Redpanda consumer group. Plan 3E replaces this with Redis Pub/Sub fanout via EventBus. Rationale: decouples SSE connection management from Redpanda consumer group membership, avoids partition assignment issues with ephemeral API instances. Redis Pub/Sub is simpler and lower-latency for ephemeral fanout.
+- Master spec (Section 9.2) defines `POST` and `GET` for `/v1/oracle/alerts`. Plan 3E adds `DELETE /v1/oracle/alerts/:id` — necessary for subscription lifecycle management.
+- Master spec (Section 9.4) shows `oracle.stream('aegdp', callback)` SDK API. Plan 3E uses `oracle.stream.connect({ channels, filter })` — more expressive, aligned with multi-channel multiplexed SSE.
+- Master spec (Section 18.1) says "SSE streams reconnect with last-event-id." Plan 3E ignores `Last-Event-ID` in v1 — clients refresh via REST. Forward-compatible event IDs emitted for v2 replay upgrade.
+- Master spec (Section 11.1) says Growth gets "Unlimited + firehose" SSE and "Unlimited + Slack/Discord" alerts. Firehose mode and Slack/Discord integrations deferred to post-v1.
+
 ---
 
 ## 1. Event Model & EventBus
@@ -59,7 +66,7 @@ class EventBus {
 }
 ```
 
-- Each event gets a monotonic `id`: `{timestamp}-{seq}` for forward-compatible `Last-Event-ID`
+- Each event gets a monotonic `id`: `{timestamp}-{seq}` for forward-compatible `Last-Event-ID`. Sequence generated via Redis INCR on `oracle:event_seq` to avoid conflicts across API instances.
 - Bus normalizes payload shape, attaches `id` and `channel` metadata, then fans out
 - Bus owns no state — stateless adapter over Redis Pub/Sub + Streams
 - Not every event goes to both surfaces; the `sse`/`webhook` flags are explicit per emission
@@ -130,7 +137,8 @@ Connection count tracked in-memory per API instance for v1. Redis SET for multi-
 
 ### Error Handling
 
-- Invalid channel name → 400 Problem Details (before stream starts)
+- Invalid channel name or malformed `filter` JSON → 400 Problem Details (before stream starts)
+- Filter keys that don't match subscribed channels → 400 Problem Details (before stream starts)
 - Auth failure → 401/403 Problem Details (before stream starts)
 - Rate limit exceeded → 429 Problem Details (before stream starts)
 - Once streaming: errors sent as `event: error` SSE frame, then connection closes
@@ -141,6 +149,8 @@ Connection count tracked in-memory per API instance for v1. Redis SET for multi-
 - `id:` field on every event (monotonic timestamp-seq)
 - On reconnect with `Last-Event-ID`: server ignores it; client refreshes state via REST
 - Forward-compatible: upgrade to short-buffer replay (v2) without changing event format
+
+**Redis Pub/Sub client note:** `node-redis` v4 requires a dedicated client for subscriptions (subscriber mode blocks regular commands). The SSE handler creates a shared subscriber client via `client.duplicate()` at startup, dispatching internally to per-connection handlers. This avoids one Redis connection per SSE client.
 
 **Location:** `apps/api/src/routes/stream.ts`
 
@@ -172,7 +182,7 @@ Connection count tracked in-memory per API instance for v1. Redis SET for multi-
 ```
 
 - `channel` — required, one of `feeds`, `agent_events`, `reports`
-- `url` — required, HTTPS only, validated on create
+- `url` — required, HTTPS only, validated on create. SSRF protection: block private/reserved IP ranges (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16). DNS resolved at create time to validate. Worker does not follow redirects.
 - `filter` — optional, narrows which events within the channel trigger this alert
 - `conditions` — optional threshold rule; if omitted, every event on the channel fires the webhook
 
@@ -202,8 +212,8 @@ Returns the subscription object + a `secret` (shown once only). The secret is us
 
 ### Signing
 
-Header: `X-Oracle-Signature`
-Value: HMAC-SHA256 of raw JSON body using the subscription's `secret`
+Delivery headers: `Content-Type: application/json`, `X-Oracle-Signature`.
+Signature value: HMAC-SHA256 of raw JSON body using the subscription's `secret`.
 
 ```
 expected = hmac_sha256(secret, raw_body)
@@ -243,8 +253,9 @@ Redis Stream (oracle:webhooks)
 
 - 5 attempts max
 - Exponential backoff: 1s, 2s, 4s, 8s, 16s
-- Retries go back into the stream with incremented attempt count
 - After 5 failures: XACK, write delivery record (state: `failed`), stop
+
+**Backoff implementation:** Redis Streams have no built-in delay. Retries use a Redis sorted set (`oracle:webhook_retries`) as a delay queue. On failure, the worker ZADDs the message with score = `now + backoff_ms`. A polling loop (1s interval) ZRANGEs for due items, moves them back to the `oracle:webhooks` stream via XADD, then ZREMs them. This keeps the main stream consumer clean and avoids in-process sleep.
 
 ### Scaling
 
@@ -266,6 +277,7 @@ Redis Stream (oracle:webhooks)
 | `WEBHOOK_TIMEOUT_MS` | `5000` | HTTP POST timeout |
 | `WEBHOOK_MAX_RETRIES` | `5` | Max delivery attempts |
 | `WEBHOOK_CONSUMER_ID` | `worker-{hostname}` | Consumer group member ID |
+| `WEBHOOK_SECRET_KEY` | required | AES-256-GCM key for decrypting subscription secrets |
 
 ### Files
 
@@ -284,15 +296,42 @@ apps/webhook-worker/
 
 ## 5. Database Changes
 
+### Existing `oracle_subscriptions` schema (from 001_control_plane.sql)
+
+```sql
+CREATE TABLE oracle_subscriptions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('webhook', 'sse')),  -- kept: distinguishes subscription type
+  feed_id TEXT,              -- DEPRECATED: superseded by channel + filter_json
+  threshold_json JSONB,      -- DEPRECATED: superseded by conditions_json
+  webhook_url TEXT,           -- kept: webhook delivery target
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+**Column reconciliation:**
+- `type` — kept as-is. Webhook subscriptions use `type = 'webhook'`. SSE connections are ephemeral (not stored in DB), so `type = 'sse'` is unused in v1.
+- `feed_id` — deprecated. Replaced by `channel` (logical topic) + `filter_json` (narrowing within channel). Left nullable, not dropped.
+- `threshold_json` — deprecated. Replaced by `conditions_json` (richer operator model). Left nullable, not dropped.
+- `webhook_url` — reused as-is for the delivery target URL.
+
 ### Migration: extend `oracle_subscriptions`
 
 ```sql
 ALTER TABLE oracle_subscriptions
-  ADD COLUMN secret_hash TEXT,
-  ADD COLUMN conditions_json JSONB,
-  ADD COLUMN filter_json JSONB,
+  ADD COLUMN channel TEXT CHECK (channel IN ('feeds', 'agent_events', 'reports')),
+  ADD COLUMN secret_encrypted TEXT,     -- AES-256-GCM encrypted HMAC secret (server-side WEBHOOK_SECRET_KEY)
+  ADD COLUMN conditions_json JSONB,     -- { field, operator, threshold }
+  ADD COLUMN filter_json JSONB,         -- { feedIds: [...] } etc.
   ADD COLUMN max_retries INT NOT NULL DEFAULT 5;
+
+-- Backfill channel from feed_id for any existing rows
+UPDATE oracle_subscriptions SET channel = 'feeds' WHERE feed_id IS NOT NULL AND channel IS NULL;
 ```
+
+**Secret storage:** The webhook worker needs the plaintext secret to compute HMAC signatures on every delivery. Storing only a hash would make signing impossible. Instead, the secret is encrypted at rest using AES-256-GCM with a server-side key (`WEBHOOK_SECRET_KEY` env var). The API encrypts on create, the worker decrypts on delivery. The `secret_encrypted` column stores the ciphertext + IV + auth tag as a single base64 blob.
 
 ### Migration: create `oracle_webhook_deliveries`
 
@@ -306,15 +345,30 @@ CREATE TABLE oracle_webhook_deliveries (
   error TEXT,
   state TEXT NOT NULL CHECK (state IN ('pending','delivered','failed')) DEFAULT 'pending',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   delivered_at TIMESTAMPTZ
 );
 CREATE INDEX idx_deliveries_sub ON oracle_webhook_deliveries(subscription_id);
 CREATE INDEX idx_deliveries_state ON oracle_webhook_deliveries(state) WHERE state = 'pending';
 ```
 
+Each row is one delivery attempt. Multiple attempts for the same event produce multiple rows (keyed by `id` = `{event_id}:{attempt}`), providing a full audit trail.
+
 ---
 
-## 6. Integration Points
+## 6. Degraded Mode (Redis Down)
+
+| Surface | Behavior |
+|---------|----------|
+| SSE endpoint | Returns 503 Service Unavailable (Problem Details). Cannot establish Pub/Sub subscription without Redis. |
+| Webhook queue (XADD) | EventBus silently drops webhook events. Logs warning. Feed updates still flow to in-memory cache and REST API — only real-time delivery is degraded. |
+| Webhook worker | Blocks on XREADGROUP reconnect loop (Redis client auto-reconnects). In-flight deliveries complete. No data loss — stream is durable, resumes on reconnect. |
+
+Redis health is already monitored by the API server's existing readiness check.
+
+---
+
+## 7. Integration Points
 
 ### Files Modified
 
@@ -335,6 +389,12 @@ CREATE INDEX idx_deliveries_state ON oracle_webhook_deliveries(state) WHERE stat
 | `apps/api/src/schemas/alerts.ts` | TypeBox schemas for alert endpoints |
 | `apps/api/src/schemas/stream.ts` | TypeBox schema for stream query params |
 
+### New Environment Variable (API)
+
+| Env var | Purpose |
+|---------|---------|
+| `WEBHOOK_SECRET_KEY` | AES-256-GCM key for encrypting webhook subscription secrets at rest |
+
 ### Unchanged
 
 - Auth plugin — reuses existing `requireTier('pro')`
@@ -344,7 +404,7 @@ CREATE INDEX idx_deliveries_state ON oracle_webhook_deliveries(state) WHERE stat
 
 ---
 
-## 7. SDK & Downstream
+## 8. SDK & Downstream
 
 ### SDK (`@lucid-fdn/oracle`)
 
@@ -385,7 +445,7 @@ Speakeasy regeneration picks up the 3 new alert CRUD endpoints as MCP tools auto
 
 ---
 
-## 8. Testing
+## 9. Testing
 
 | Test | Type | What it validates |
 |------|------|-------------------|
@@ -408,7 +468,7 @@ Speakeasy regeneration picks up the 3 new alert CRUD endpoints as MCP tools auto
 
 ---
 
-## 9. SLOs
+## 10. SLOs
 
 | Metric | Target |
 |--------|--------|
@@ -419,11 +479,12 @@ Speakeasy regeneration picks up the 3 new alert CRUD endpoints as MCP tools auto
 
 ---
 
-## 10. Out of Scope (v1)
+## 11. Out of Scope (v1)
 
 - SSE replay / `Last-Event-ID` buffer (upgrade path to v2)
 - SSE-driven dashboard cache invalidation (dashboard stays polling for now)
 - Cross-instance SSE connection counting (in-memory per instance is fine for v1)
 - Webhook delivery dashboard/UI
-- Firehose mode for Growth tier (channel multiplexing is sufficient)
+- Firehose mode for Growth tier (channel multiplexing is sufficient) — deferred master spec feature
+- Slack/Discord alert integrations — deferred master spec feature (Growth tier)
 - Alert pause/resume (delete and recreate)
