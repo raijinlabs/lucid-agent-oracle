@@ -50,6 +50,22 @@ npm publish --access public              # Publish update
 
 **Method name stability:** The overlay (`openapi/overlay.yaml`) must be kept in sync with the API spec on every SDK release. If an API path is renamed or removed without updating the overlay's JSONPath target, `speakeasy run` will silently drop the method from the SDK. Always verify that the generated SDK has all 15 methods after regeneration.
 
+### Dashboard (Plan 3D)
+
+Dashboard lives in LucidMerged repo at `src/app/(oracle)/`. Requires `FEATURE_ORACLE_DASHBOARD=true` env var.
+
+```bash
+# Local development
+cd C:\LucidMerged
+FEATURE_ORACLE_DASHBOARD=true npm run dev
+# Access at http://localhost:3000/oracle or http://oracle.localhost:3000
+```
+
+**Key directories:**
+- `src/app/(oracle)/` — Route group (layouts, pages, loading skeletons)
+- `src/components/oracle/` — Domain-specific components
+- `src/lib/oracle/` — SDK provider, hooks, cache keys
+
 ## Tech Stack
 
 - **Runtime:** Node.js, TypeScript (ESM, .js extensions in imports)
@@ -98,7 +114,7 @@ All in `services/redis.ts` → `keys` object. Leaderboard uses versioned namespa
 | Plan 4B | Done | Self-registration + identity evidence + conflict review |
 | Plan 3B | Done | MCP tools — 3 new endpoints + OpenAPI annotations + Speakeasy MCP server (12 tools) |
 | Plan 3C | Done | SDK (`@lucid-fdn/oracle` TypeScript client, overlay-driven Speakeasy generation) |
-| Plan 3D | Planned | Dashboard (Next.js in LucidMerged) |
+| Plan 3D | Done | Dashboard (Next.js in LucidMerged — `oracle.lucid.foundation`, extraction-ready `(oracle)/` route group) |
 | Plan 3E | Planned | SSE streaming + webhook alerts |
 
 ## Key Files
