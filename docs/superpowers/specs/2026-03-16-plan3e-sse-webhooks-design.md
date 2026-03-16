@@ -92,19 +92,33 @@ Single webhook stream because the webhook worker processes all alert types. Chan
 
 `GET /v1/oracle/stream` — Pro tier required.
 
+### Authentication
+
+Native browser `EventSource` cannot send custom headers (`x-api-key`). SSE auth uses a **short-lived stream token** issued via a new endpoint:
+
+1. Client calls `POST /v1/oracle/stream/token` with `x-api-key` header (standard auth)
+2. Server returns `{ "token": "<jwt>", "expiresIn": 300 }` — JWT signed with `STREAM_TOKEN_SECRET`, 5-minute TTL, contains `tenantId` and `plan`
+3. Client opens `EventSource(/v1/oracle/stream?token=<jwt>&channels=...)`
+4. SSE handler validates JWT, extracts tenant/plan, proceeds as normal
+
+This keeps the `x-api-key` out of URLs/logs while supporting browser EventSource. Server-side clients can also use the token flow, or pass `x-api-key` directly if using a fetch-based SSE client.
+
+The token endpoint is lightweight — no DB call, just JWT sign with the tenant already resolved by auth middleware.
+
 ### Query Parameters
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
+| `token` | string | yes | Short-lived JWT from `POST /stream/token` (or `x-api-key` header for non-browser clients) |
 | `channels` | string | yes | Comma-separated: `feeds,agent_events,reports` (1-3 values) |
 | `filter` | JSON string | no | Narrows within channels: `{"feeds":["aegdp"],"agent_events":["agent_123"]}` |
 
 ### Connection Lifecycle
 
 ```
-Client opens EventSource(/v1/oracle/stream?channels=feeds,reports)
-  → Auth check (requireTier('pro'))
-  → Validate channels param
+Client opens EventSource(/v1/oracle/stream?token=<jwt>&channels=feeds,reports)
+  → Validate JWT (or x-api-key header fallback) → extract tenant/plan
+  → Check plan >= Pro
   → Subscribe to Redis Pub/Sub: oracle:events:feeds, oracle:events:reports
   → Send: ": connected\n\n"
   → Send: "retry: 5000\n\n"
@@ -162,6 +176,7 @@ Connection count tracked in-memory per API instance for v1. Redis SET for multi-
 
 | Method | Path | Description | Tier |
 |--------|------|-------------|------|
+| `POST` | `/v1/oracle/stream/token` | Issue short-lived SSE stream token | Pro |
 | `POST` | `/v1/oracle/alerts` | Create webhook subscription | Pro |
 | `GET` | `/v1/oracle/alerts` | List tenant's subscriptions | Pro |
 | `DELETE` | `/v1/oracle/alerts/:id` | Delete subscription | Pro |
@@ -182,7 +197,7 @@ Connection count tracked in-memory per API instance for v1. Redis SET for multi-
 ```
 
 - `channel` — required, one of `feeds`, `agent_events`, `reports`
-- `url` — required, HTTPS only, validated on create. SSRF protection: block private/reserved IP ranges (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16). DNS resolved at create time to validate. Worker does not follow redirects.
+- `url` — required, HTTPS only. SSRF protection at **both create time and delivery time**: DNS resolved and checked against blocked private/reserved IP ranges (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1, fc00::/7, fe80::/10). Create-time validation is a fast-fail UX optimization. Delivery-time validation is the security gate (DNS can change). Worker does not follow redirects.
 - `filter` — optional, narrows which events within the channel trigger this alert
 - `conditions` — optional threshold rule; if omitted, every event on the channel fires the webhook
 
@@ -233,21 +248,29 @@ valid = timing_safe_equal(expected, header_value)
 
 ### Process Flow
 
+Each stream message is a raw event (channel + payload), not pre-matched to a subscription. The worker fans out to all matching subscriptions:
+
 ```
 Redis Stream (oracle:webhooks)
   → XREADGROUP GROUP webhook-workers CONSUMER worker-{id} BLOCK 5000
-  → For each message:
-      1. Load subscription from DB (in-memory cache, 60s TTL)
-      2. Check subscription still active
-      3. Evaluate conditions against event payload
-      4. If conditions met:
-         - Sign payload with subscription secret
-         - POST to webhook URL (5s timeout)
-         - On 2xx: XACK, write delivery record (state: delivered)
-         - On 4xx: XACK, write delivery record (state: failed, no retry)
-         - On 5xx/timeout: schedule retry
-      5. If conditions not met: XACK, skip
+  → For each message (channel + payload):
+      1. Load all active subscriptions for this channel from DB
+         (in-memory cache keyed by channel, 60s TTL, invalidated on create/delete)
+      2. For each matching subscription:
+         a. Apply subscription's filter_json (e.g., feedIds match?)
+         b. Evaluate subscription's conditions_json against payload
+         c. If filter + conditions pass:
+            - Decrypt subscription secret
+            - Sign payload with HMAC-SHA256
+            - POST to webhook_url (5s timeout)
+            - On 2xx: write delivery record (state: delivered)
+            - On 4xx: write delivery record (state: failed, no retry)
+            - On 5xx/timeout: schedule retry for this (event, subscription) pair
+         d. If filter/conditions don't match: skip (no delivery record)
+      3. XACK the original message after all subscriptions processed
 ```
+
+**Key detail:** one stream event can produce 0..N webhook deliveries (one per matching subscription). The event is only ACKed after all subscriptions are evaluated.
 
 ### Retry Policy
 
@@ -337,7 +360,7 @@ UPDATE oracle_subscriptions SET channel = 'feeds' WHERE feed_id IS NOT NULL AND 
 
 ```sql
 CREATE TABLE oracle_webhook_deliveries (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
   subscription_id TEXT NOT NULL REFERENCES oracle_subscriptions(id) ON DELETE CASCADE,
   event_id TEXT NOT NULL,
   attempt INT NOT NULL DEFAULT 1,
@@ -346,13 +369,14 @@ CREATE TABLE oracle_webhook_deliveries (
   state TEXT NOT NULL CHECK (state IN ('pending','delivered','failed')) DEFAULT 'pending',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  delivered_at TIMESTAMPTZ
+  delivered_at TIMESTAMPTZ,
+  UNIQUE (subscription_id, event_id, attempt)
 );
 CREATE INDEX idx_deliveries_sub ON oracle_webhook_deliveries(subscription_id);
 CREATE INDEX idx_deliveries_state ON oracle_webhook_deliveries(state) WHERE state = 'pending';
 ```
 
-Each row is one delivery attempt. Multiple attempts for the same event produce multiple rows (keyed by `id` = `{event_id}:{attempt}`), providing a full audit trail.
+Each row is one delivery attempt. The same event fans out to multiple subscriptions, so `id` is a surrogate UUID. The `UNIQUE (subscription_id, event_id, attempt)` constraint prevents duplicate delivery records. Multiple attempts for the same (subscription, event) pair produce multiple rows with incrementing `attempt`, providing a full audit trail.
 
 ---
 
@@ -360,11 +384,11 @@ Each row is one delivery attempt. Multiple attempts for the same event produce m
 
 | Surface | Behavior |
 |---------|----------|
-| SSE endpoint | Returns 503 Service Unavailable (Problem Details). Cannot establish Pub/Sub subscription without Redis. |
-| Webhook queue (XADD) | EventBus silently drops webhook events. Logs warning. Feed updates still flow to in-memory cache and REST API — only real-time delivery is degraded. |
-| Webhook worker | Blocks on XREADGROUP reconnect loop (Redis client auto-reconnects). In-flight deliveries complete. No data loss — stream is durable, resumes on reconnect. |
+| SSE endpoint | Returns 503 Service Unavailable (Problem Details). Cannot establish Pub/Sub subscription without Redis. Existing SSE connections receive `event: error` frame and close. |
+| Webhook queue (XADD) | EventBus buffers up to 100 events in an in-memory ring buffer. If Redis recovers within the buffer window, events are flushed to the stream. If the buffer overflows, oldest events are dropped. Each drop is logged at `warn` level with event ID and channel. This bounds memory usage while giving Redis a short recovery window. |
+| Webhook worker | Blocks on XREADGROUP reconnect loop (Redis client auto-reconnects). In-flight deliveries complete. Stream is durable — once Redis recovers, the worker resumes from where it left off with no data loss on the worker side. |
 
-Redis health is already monitored by the API server's existing readiness check.
+Redis health is already monitored by the API server's existing readiness check. The EventBus exposes a `healthy` boolean for readiness probes.
 
 ---
 
@@ -375,7 +399,7 @@ Redis health is already monitored by the API server's existing readiness check.
 | File | Change |
 |------|--------|
 | `apps/api/src/server.ts` | Import EventBus; wire to Redpanda consumer handlers |
-| `apps/api/src/routes/v1.ts` | Register SSE route + alert CRUD routes |
+| `apps/api/src/routes/v1.ts` | Register SSE route + stream token route + alert CRUD routes |
 | `apps/api/src/services/redis.ts` | Add Pub/Sub subscriber helper + Stream XADD/XREAD helpers |
 | `packages/core/src/index.ts` | Export shared event types (channel names, payload shapes) |
 
@@ -389,11 +413,12 @@ Redis health is already monitored by the API server's existing readiness check.
 | `apps/api/src/schemas/alerts.ts` | TypeBox schemas for alert endpoints |
 | `apps/api/src/schemas/stream.ts` | TypeBox schema for stream query params |
 
-### New Environment Variable (API)
+### New Environment Variables (API)
 
 | Env var | Purpose |
 |---------|---------|
 | `WEBHOOK_SECRET_KEY` | AES-256-GCM key for encrypting webhook subscription secrets at rest |
+| `STREAM_TOKEN_SECRET` | HMAC-SHA256 key for signing short-lived SSE stream tokens (JWT) |
 
 ### Unchanged
 
