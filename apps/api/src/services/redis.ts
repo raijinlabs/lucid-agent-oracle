@@ -2,6 +2,7 @@ import { createClient } from 'redis'
 import type { RedisClientType } from 'redis'
 import { createHash } from 'node:crypto'
 import { PROTOCOL_REGISTRY } from './agent-query.js'
+import type { Channel } from '@lucid/oracle-core'
 
 // Module-level singleton
 let _client: RedisClientType | null = null
@@ -30,6 +31,10 @@ export function getRedis(): RedisClientType | null {
 
 /** Gracefully quit and null the Redis client. */
 export async function closeRedis(): Promise<void> {
+  if (_subscriber) {
+    await _subscriber.quit().catch(() => {})
+    _subscriber = null
+  }
   if (_client) {
     await _client.quit().catch(() => {})
     _client = null
@@ -51,6 +56,10 @@ export const keys = {
     `oracle:feed:history:${feedId}:${period}:${interval}:${plan}`,
   modelUsage: (period: string, limit: number, plan: string) =>
     `oracle:model-usage:${period}:${limit}:${plan}`,
+  sseChannel: (channel: string) => `oracle:events:${channel}`,
+  webhookStream: () => 'oracle:webhooks',
+  webhookRetries: () => 'oracle:webhook_retries',
+  eventSeq: () => 'oracle:event_seq',
 }
 
 /**
@@ -113,4 +122,54 @@ export async function loadLeaderboardVersion(): Promise<void> {
   const raw = await _client.get(keys.leaderboardVersion())
   const version = raw !== null ? parseInt(raw, 10) : 0
   ;(globalThis as Record<string, unknown>).__lbVersion = isNaN(version) ? 0 : version
+}
+
+// ── Pub/Sub subscriber client (for SSE) ──────────────────────
+
+let _subscriber: RedisClientType | null = null
+
+export async function getSubscriber(): Promise<RedisClientType | null> {
+  if (_subscriber) return _subscriber
+  const client = getRedis()
+  if (!client) return null
+  _subscriber = client.duplicate() as RedisClientType
+  await _subscriber.connect()
+  return _subscriber
+}
+
+// ── SSE Pub/Sub helpers ──────────────────────────────────────
+
+export async function publishEvent(
+  channel: Channel,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const client = getRedis()
+  if (!client) return
+  await client.publish(
+    `oracle:events:${channel}`,
+    JSON.stringify(payload),
+  )
+}
+
+// ── Webhook Stream helpers ───────────────────────────────────
+
+export async function enqueueWebhook(
+  channel: Channel,
+  payload: Record<string, unknown>,
+): Promise<string | null> {
+  const client = getRedis()
+  if (!client) return null
+  return client.xAdd('oracle:webhooks', '*', {
+    channel,
+    payload: JSON.stringify(payload),
+  })
+}
+
+// ── Event ID generation ──────────────────────────────────────
+
+export async function nextEventId(): Promise<string> {
+  const client = getRedis()
+  if (!client) return `${Date.now()}-0`
+  const seq = await client.incr('oracle:event_seq')
+  return `${Date.now()}-${seq}`
 }
