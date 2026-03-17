@@ -73,3 +73,13 @@ export { RedpandaProducer, RedpandaConsumer, TOPICS, type RedpandaConfig } from 
 
 // Utils
 export { canonicalStringify } from './utils/canonical-json.js'
+
+// Events (Plan 3E)
+export {
+  CHANNELS,
+  type Channel,
+  type FeedEventPayload,
+  type AgentEventPayload,
+  type ReportEventPayload,
+  type OracleEvent,
+} from './events.js'
