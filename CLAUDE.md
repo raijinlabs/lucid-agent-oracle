@@ -12,6 +12,7 @@ apps/api/            — Fastify REST API (:4040) — feeds, agents, protocols, 
 apps/worker/         — Feed computation worker (poll → ingest → compute → publish)
 apps/publisher/      — On-chain publication (Solana + Base)
 apps/ponder/         — EVM indexer (Ponder) for ERC-8004 + Base events
+apps/webhook-worker/ — Webhook delivery worker (Redis Streams consumer, retry backoff)
 ```
 
 ## Commands
@@ -115,7 +116,7 @@ All in `services/redis.ts` → `keys` object. Leaderboard uses versioned namespa
 | Plan 3B | Done | MCP tools — 3 new endpoints + OpenAPI annotations + Speakeasy MCP server (12 tools) |
 | Plan 3C | Done | SDK (`@lucid-fdn/oracle` TypeScript client, overlay-driven Speakeasy generation) |
 | Plan 3D | Done | Dashboard (Next.js in LucidMerged — `oracle.lucid.foundation`, extraction-ready `(oracle)/` route group) |
-| Plan 3E | Planned | SSE streaming + webhook alerts |
+| Plan 3E | Done | SSE streaming + webhook alerts (EventBus, Redis Pub/Sub + Streams, webhook-worker) |
 
 ## Key Files
 
@@ -131,7 +132,12 @@ All in `services/redis.ts` → `keys` object. Leaderboard uses versioned namespa
 | `apps/api/src/plugins/cache.ts` | Redis response cache |
 | `apps/api/src/plugins/rate-limit.ts` | Per-route rate limiting (in-memory, not Redis) |
 | `apps/api/src/utils/cursor.ts` | HMAC-SHA256 signed cursor encode/decode |
-| `packages/core/src/index.ts` | Core exports — feeds, adapters, verifiers, types |
+| `apps/api/src/services/event-bus.ts` | EventBus — dual fanout to Pub/Sub (SSE) + Streams (webhooks) |
+| `apps/api/src/routes/stream.ts` | SSE endpoint + stream token auth |
+| `apps/api/src/routes/alerts.ts` | Webhook alert CRUD |
+| `apps/api/src/utils/crypto.ts` | AES-256-GCM encryption, HMAC signing, SSRF validation |
+| `apps/webhook-worker/src/index.ts` | Webhook delivery worker (Redis Streams consumer) |
+| `packages/core/src/index.ts` | Core exports — feeds, adapters, verifiers, types, events |
 
 ## Conventions
 
