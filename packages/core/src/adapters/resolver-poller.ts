@@ -51,7 +51,19 @@ export async function processAdapterEvents(
 
     for (const row of result.rows) {
       try {
-        await dispatch(row.source, row.payload_json, client)
+        // Merge row metadata with payload so handlers get the full event shape
+        const fullEvent = {
+          ...(typeof row.payload_json === 'string' ? JSON.parse(row.payload_json) : row.payload_json),
+          event_type: row.event_type,
+          event_id: row.event_id,
+          source: row.source,
+          chain: row.chain,
+          block_number: row.block_number,
+          tx_hash: row.tx_hash,
+          log_index: row.log_index,
+          timestamp: row.event_timestamp,
+        }
+        await dispatch(row.source, fullEvent, client)
 
         await client.query(
           'UPDATE oracle_raw_adapter_events SET processed_at = now() WHERE id = $1',

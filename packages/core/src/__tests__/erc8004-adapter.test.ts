@@ -48,17 +48,17 @@ describe('erc8004Adapter identity handler', () => {
 
     // Should create entity
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO agent_entities'),
+      expect.stringContaining('INSERT INTO oracle_agent_entities'),
       expect.arrayContaining([expect.stringContaining('ae_'), 'agent-1']),
     )
     // Should create TBA wallet mapping
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO wallet_mappings'),
+      expect.stringContaining('INSERT INTO oracle_wallet_mappings'),
       expect.arrayContaining(['0xTBA', 'erc8004_tba']),
     )
     // Should create owner wallet mapping
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO wallet_mappings'),
+      expect.stringContaining('INSERT INTO oracle_wallet_mappings'),
       expect.arrayContaining(['0xOwner', 'erc8004_owner']),
     )
     // Should publish watchlist updates
@@ -78,7 +78,7 @@ describe('erc8004Adapter identity handler', () => {
     await handler.handleEvent(event as any, db, producer)
 
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE agent_entities SET display_name'),
+      expect.stringContaining('UPDATE oracle_agent_entities SET display_name'),
       expect.arrayContaining(['Updated Agent', 'ae_existing']),
     )
   })
@@ -98,7 +98,7 @@ describe('erc8004Adapter identity handler', () => {
     await handler.handleEvent(event as any, db, producer)
 
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE agent_entities SET reputation_json'),
+      expect.stringContaining('UPDATE oracle_agent_entities SET reputation_json'),
       expect.arrayContaining([expect.stringContaining('"score":8500'), 'ae_existing']),
     )
   })
@@ -118,7 +118,7 @@ describe('erc8004Adapter identity handler', () => {
 
     // Should soft-delete old owner mapping
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE wallet_mappings SET removed_at'),
+      expect.stringContaining('UPDATE oracle_wallet_mappings SET removed_at'),
       expect.arrayContaining(['0xOldOwner']),
     )
     // Should publish remove + add watchlist updates

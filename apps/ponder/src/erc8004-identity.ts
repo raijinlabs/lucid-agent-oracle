@@ -1,6 +1,6 @@
 import { ponder } from '@/generated'
 import { writeERC8004Event } from './adapter-sink.js'
-import { computeEventId } from '../../../packages/core/src/types/events.js'
+import { computeEventId } from '@lucid/oracle-core'
 
 ponder.on('IdentityRegistry:AgentRegistered', async ({ event }) => {
   await writeERC8004Event({

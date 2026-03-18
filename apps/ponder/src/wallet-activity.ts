@@ -1,6 +1,6 @@
 import { ponder } from '@/generated'
 import { writeWalletEvent } from './adapter-sink.js'
-import { computeEventId } from '../../../packages/core/src/types/events.js'
+import { computeEventId } from '@lucid/oracle-core'
 
 /**
  * In-memory watchlist of known agent wallets on Base.

@@ -34,7 +34,7 @@ async function handleAgentRegistered(
   producer: RedpandaProducer,
 ): Promise<void> {
   const existing = await db.query(
-    'SELECT id FROM agent_entities WHERE erc8004_id = $1',
+    'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
     [event.agent_id],
   )
 
@@ -44,7 +44,7 @@ async function handleAgentRegistered(
   } else {
     const id = `ae_${nanoid(12)}`
     await db.query(
-      'INSERT INTO agent_entities (id, erc8004_id, created_at, updated_at) VALUES ($1, $2, now(), now())',
+      'INSERT INTO oracle_agent_entities (id, erc8004_id, created_at, updated_at) VALUES ($1, $2, now(), now())',
       [id, event.agent_id],
     )
     entityId = id
@@ -59,7 +59,7 @@ async function handleAgentRegistered(
   await publishWatchlistUpdate(producer, 'add', 'base', event.owner_address, entityId)
 
   await db.query(
-    `INSERT INTO identity_links (agent_entity, protocol, protocol_id, link_type, confidence, evidence_json)
+    `INSERT INTO oracle_identity_links (agent_entity, protocol, protocol_id, link_type, confidence, evidence_json)
      VALUES ($1, 'erc8004', $2, 'on_chain_proof', 1.0, $3)
      ON CONFLICT (protocol, protocol_id) DO NOTHING`,
     [entityId, event.agent_id, JSON.stringify({ tx_hash: event.tx_hash, block: event.block_number })],
@@ -68,7 +68,7 @@ async function handleAgentRegistered(
 
 async function handleAgentUpdated(event: ERC8004Event, db: DbClient): Promise<void> {
   const existing = await db.query(
-    'SELECT id FROM agent_entities WHERE erc8004_id = $1',
+    'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
     [event.agent_id],
   )
   if (existing.rows.length === 0) {
@@ -79,7 +79,7 @@ async function handleAgentUpdated(event: ERC8004Event, db: DbClient): Promise<vo
     const raw = JSON.parse(event.raw_data)
     if (raw.metadataUri || raw.name) {
       await db.query(
-        'UPDATE agent_entities SET display_name = COALESCE($1, display_name), updated_at = now() WHERE id = $2',
+        'UPDATE oracle_agent_entities SET display_name = COALESCE($1, display_name), updated_at = now() WHERE id = $2',
         [raw.name ?? raw.metadataUri, existing.rows[0].id],
       )
     }
@@ -90,7 +90,7 @@ async function handleAgentUpdated(event: ERC8004Event, db: DbClient): Promise<vo
 
 async function handleReputationUpdated(event: ERC8004Event, db: DbClient): Promise<void> {
   const existing = await db.query(
-    'SELECT id FROM agent_entities WHERE erc8004_id = $1',
+    'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
     [event.agent_id],
   )
   if (existing.rows.length === 0) {
@@ -98,7 +98,7 @@ async function handleReputationUpdated(event: ERC8004Event, db: DbClient): Promi
     return
   }
   await db.query(
-    `UPDATE agent_entities SET reputation_json = $1, reputation_updated_at = now(), updated_at = now() WHERE id = $2`,
+    `UPDATE oracle_agent_entities SET reputation_json = $1, reputation_updated_at = now(), updated_at = now() WHERE id = $2`,
     [JSON.stringify({ score: event.reputation_score, validator: event.validator_address, evidence: event.evidence_hash }), existing.rows[0].id],
   )
 }
@@ -109,7 +109,7 @@ async function handleOwnershipTransferred(
   producer: RedpandaProducer,
 ): Promise<void> {
   const existing = await db.query(
-    'SELECT id FROM agent_entities WHERE erc8004_id = $1',
+    'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
     [event.agent_id],
   )
   if (existing.rows.length === 0) {
@@ -126,7 +126,7 @@ async function handleOwnershipTransferred(
 
   if (oldOwner) {
     await db.query(
-      `UPDATE wallet_mappings SET removed_at = now() WHERE chain = 'base' AND LOWER(address) = LOWER($1) AND removed_at IS NULL`,
+      `UPDATE oracle_wallet_mappings SET removed_at = now() WHERE chain = 'base' AND LOWER(address) = LOWER($1) AND removed_at IS NULL`,
       [oldOwner],
     )
     await publishWatchlistUpdate(producer, 'remove', 'base', oldOwner, entityId)
@@ -145,7 +145,7 @@ async function upsertWalletMapping(
   txHash: string,
 ): Promise<void> {
   await db.query(
-    `INSERT INTO wallet_mappings (agent_entity, chain, address, link_type, confidence, evidence_hash)
+    `INSERT INTO oracle_wallet_mappings (agent_entity, chain, address, link_type, confidence, evidence_hash)
      VALUES ($1, $2, $3, $4, 1.0, $5)
      ON CONFLICT (chain, address) WHERE removed_at IS NULL DO UPDATE SET
        agent_entity = EXCLUDED.agent_entity,
@@ -156,12 +156,13 @@ async function upsertWalletMapping(
 }
 
 async function publishWatchlistUpdate(
-  producer: RedpandaProducer,
+  producer: RedpandaProducer | null,
   action: 'add' | 'remove',
   chain: 'base' | 'solana',
   address: string,
   entityId: string,
 ): Promise<void> {
+  if (!producer) return // No-broker mode — watchlist refresh via Redis or timer
   const update: WatchlistUpdate = { action, chain, address, agent_entity_id: entityId }
   await producer.publishJson(TOPICS.WATCHLIST, `${chain}:${address}`, update)
 }

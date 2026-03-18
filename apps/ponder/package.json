@@ -9,9 +9,11 @@
     "codegen": "ponder codegen"
   },
   "dependencies": {
+    "@lucid/oracle-core": "*",
     "@ponder/core": "^0.7.0",
     "hono": "^4.0.0",
-    "kafkajs": "^2.2.0",
+    "pg": "^8.13.0",
+    "redis": "^4.7.1",
     "viem": "^2.0.0"
   }
 }

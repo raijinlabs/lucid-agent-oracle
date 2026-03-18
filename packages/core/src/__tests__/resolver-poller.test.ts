@@ -26,8 +26,15 @@ describe('processAdapterEvents', () => {
     mockClient.query.mockResolvedValueOnce({
       rows: [{
         id: 1,
+        event_id: 'test_1',
         source: 'erc8004',
+        chain: 'base',
+        event_type: 'agent_registered',
+        event_timestamp: '2026-03-19T00:00:00Z',
         payload_json: { agent_id: '0x123' },
+        block_number: 20000001,
+        tx_hash: '0xabc',
+        log_index: 0,
         error_count: 0,
       }],
     })
@@ -39,7 +46,12 @@ describe('processAdapterEvents', () => {
 
     const n = await processAdapterEvents(mockPool as any, mockDispatch, 10)
     expect(n).toBe(1)
-    expect(mockDispatch).toHaveBeenCalledWith('erc8004', { agent_id: '0x123' }, mockClient)
+    // Dispatch receives merged event: payload fields + row metadata
+    expect(mockDispatch).toHaveBeenCalledWith(
+      'erc8004',
+      expect.objectContaining({ agent_id: '0x123', event_type: 'agent_registered', chain: 'base' }),
+      mockClient,
+    )
   })
 
   it('returns 0 when no events pending', async () => {

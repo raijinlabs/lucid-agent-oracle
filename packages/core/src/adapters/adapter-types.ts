@@ -75,7 +75,7 @@ export interface IdentityHandler {
   handleEvent(
     event: Record<string, unknown>,
     db: DbClient,
-    producer: RedpandaProducer,
+    producer: RedpandaProducer | null,
   ): Promise<void>
 }
 
