@@ -80,7 +80,7 @@ export async function publishFeedValue(
   const row: PublishedFeedRow = {
     feed_id: result.feedId,
     feed_version: def.version,
-    computed_at: now.toISOString(),
+    computed_at: now.toISOString().replace('T', ' ').replace('Z', ''),
     revision: 0,
     pub_status_rev: 0,
     value_json: result.valueJson,
@@ -111,7 +111,7 @@ export async function publishFeedValue(
   const publicationRequest: PublicationRequest = {
     feed_id: result.feedId,
     feed_version: def.version,
-    computed_at: now.toISOString(),
+    computed_at: now.toISOString().replace('T', ' ').replace('Z', ''),
     revision: 0,
     value_json: result.valueJson,
     value_usd: result.valueUsd,
