@@ -1,0 +1,159 @@
+##
+# Lucid Agent Oracle — local development stack
+#
+# Usage:
+#   docker compose up -d            # Start infra + services
+#   docker compose up -d postgres clickhouse redis redpanda  # Infra only
+#   docker compose logs -f api      # Tail API logs
+#   docker compose down -v          # Tear down + delete volumes
+##
+
+services:
+  # ── Infrastructure ────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: oracle
+      POSTGRES_USER: oracle
+      POSTGRES_PASSWORD: oracle
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/supabase:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oracle -d oracle"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # Native
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DB: oracle
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ./migrations/clickhouse:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--password", "clickhouse", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --smp 1
+      - --memory 256M
+      - --overprovisioned
+      - --node-id 0
+    ports:
+      - "19092:19092"  # Kafka API (external)
+      - "8082:8082"    # Schema Registry
+      - "9644:9644"    # Admin API
+    volumes:
+      - rpdata:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Application services ──────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      target: api
+    ports:
+      - "4040:4040"
+    environment:
+      PORT: "4040"
+      DATABASE_URL: postgresql://oracle:oracle@postgres:5432/oracle
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_URL: redis://redis:6379
+      REDPANDA_BROKERS: redpanda:9092
+      CURSOR_SECRET: dev-cursor-secret-change-in-prod
+      STREAM_TOKEN_SECRET: dev-stream-token-secret-change-in-prod
+      WEBHOOK_SECRET_KEY: dev-webhook-secret-key-32chars!!
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4040/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      target: worker
+    environment:
+      DATABASE_URL: postgresql://oracle:oracle@postgres:5432/oracle
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDPANDA_BROKERS: redpanda:9092
+      ORACLE_ATTESTATION_KEY: "0000000000000000000000000000000000000000000000000000000000000001"
+      POLL_INTERVAL_MS: "30000"
+      COMPUTATION_WINDOW_MS: "3600000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  webhook-worker:
+    build:
+      context: .
+      target: webhook-worker
+    environment:
+      DATABASE_URL: postgresql://oracle:oracle@postgres:5432/oracle
+      REDIS_URL: redis://redis:6379
+      WEBHOOK_SECRET_KEY: dev-webhook-secret-key-32chars!!
+      WEBHOOK_TIMEOUT_MS: "5000"
+      WEBHOOK_MAX_RETRIES: "5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  chdata:
+  redisdata:
+  rpdata:

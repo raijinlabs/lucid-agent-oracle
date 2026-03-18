@@ -6,6 +6,7 @@ COPY apps/api/package.json apps/api/
 COPY apps/worker/package.json apps/worker/
 COPY apps/publisher/package.json apps/publisher/
 COPY apps/ponder/package.json apps/ponder/
+COPY apps/webhook-worker/package.json apps/webhook-worker/
 RUN npm install
 COPY . .
 
@@ -23,6 +24,10 @@ CMD ["npx", "tsx", "apps/worker/src/index.ts"]
 # Publisher target
 FROM base AS publisher
 CMD ["npx", "tsx", "apps/publisher/src/index.ts"]
+
+# Webhook worker target
+FROM base AS webhook-worker
+CMD ["npx", "tsx", "apps/webhook-worker/src/index.ts"]
 
 # Ponder target (Base indexer)
 FROM base AS ponder
