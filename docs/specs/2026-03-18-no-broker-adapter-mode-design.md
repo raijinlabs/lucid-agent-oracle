@@ -105,7 +105,8 @@ export class DirectSink implements AdapterSink {
   }
 
   async writeRawEvents(events: RawAdapterEvent[]): Promise<void> {
-    // Batch insert via unnest or multi-row VALUES
+    // v1: per-row insert for simplicity.
+    // Upgrade to batched INSERT with unnest/multi-row VALUES when volume exceeds ~1k events/sec.
     for (const e of events) await this.writeRawEvent(e)
   }
 
@@ -155,8 +156,8 @@ One env var (`REDPANDA_BROKERS`) switches the mode. Adapters never know.
 
 CREATE TABLE IF NOT EXISTS oracle_raw_adapter_events (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  event_id TEXT NOT NULL UNIQUE,
-  source TEXT NOT NULL,
+  event_id TEXT NOT NULL UNIQUE,       -- globally unique, adapter-generated
+  source TEXT NOT NULL,                -- 'erc8004', 'helius', 'lucid_gateway'
   source_adapter_ver INTEGER NOT NULL DEFAULT 1,
   chain TEXT NOT NULL,
   event_type TEXT NOT NULL,
@@ -166,21 +167,40 @@ CREATE TABLE IF NOT EXISTS oracle_raw_adapter_events (
   tx_hash TEXT,
   log_index INTEGER,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  processed_at TIMESTAMPTZ  -- NULL = unprocessed
+  -- Processing state
+  processed_at TIMESTAMPTZ,            -- NULL = unprocessed, set on success
+  error_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,                     -- last resolver error message
+  failed_at TIMESTAMPTZ                -- set when error_count exceeds max retries
 );
+
+-- Uniqueness: event_id is globally unique. Adapters must generate deterministic IDs
+-- using computeEventId(source, chain, tx_hash, log_index) to ensure idempotent writes.
 
 CREATE INDEX IF NOT EXISTS idx_raw_adapter_unprocessed
   ON oracle_raw_adapter_events (created_at)
-  WHERE processed_at IS NULL;
+  WHERE processed_at IS NULL AND failed_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_raw_adapter_source
   ON oracle_raw_adapter_events (source, chain, event_type);
+
+CREATE INDEX IF NOT EXISTS idx_raw_adapter_failed
+  ON oracle_raw_adapter_events (failed_at)
+  WHERE failed_at IS NOT NULL;
 ```
 
 This table is:
 - **The audit trail** — every raw event from every adapter, forever
-- **The processing queue** — resolver polls `WHERE processed_at IS NULL`
+- **The processing queue** — resolver polls `WHERE processed_at IS NULL AND failed_at IS NULL`
 - **The replay source** — set `processed_at = NULL` to reprocess
+
+**Replay safety:** Replay is safe because all resolver writes are idempotent via unique constraints and upserts:
+- `oracle_agent_entities` — `ON CONFLICT (id) DO UPDATE`
+- `oracle_wallet_mappings` — `UNIQUE (chain, address) WHERE removed_at IS NULL`
+- `oracle_identity_links` — `UNIQUE (protocol, protocol_id)`
+- `oracle_identity_evidence` — dedup indexes on `(agent_entity, evidence_type, chain, address)`
+
+Replaying an already-processed event will hit these constraints and produce no change. No special replay flag is needed.
 
 ## 3. Resolver Polling
 
@@ -189,33 +209,63 @@ The existing identity resolver logic (Plan 4A) consumes from this staging table 
 ```typescript
 // In the API server or a dedicated resolver worker
 
+const MAX_ERROR_COUNT = 5
+
 async function processAdapterEvents(pool: pg.Pool, batchSize = 100): Promise<number> {
-  // FOR UPDATE SKIP LOCKED prevents concurrent processing
-  const result = await pool.query(
-    `SELECT * FROM oracle_raw_adapter_events
-     WHERE processed_at IS NULL
-     ORDER BY created_at
-     LIMIT $1
-     FOR UPDATE SKIP LOCKED`,
-    [batchSize]
-  )
+  const client = await pool.connect()
+  let processed = 0
 
-  for (const row of result.rows) {
-    // Dispatch to existing adapter identity handlers
-    await dispatchIdentityEvent(row.source, JSON.parse(row.payload_json), pool)
-
-    // Mark processed
-    await pool.query(
-      'UPDATE oracle_raw_adapter_events SET processed_at = now() WHERE id = $1',
-      [row.id]
+  try {
+    // Process one row at a time within a transaction
+    // FOR UPDATE SKIP LOCKED prevents concurrent resolver instances from clashing
+    await client.query('BEGIN')
+    const result = await client.query(
+      `SELECT * FROM oracle_raw_adapter_events
+       WHERE processed_at IS NULL AND failed_at IS NULL
+       ORDER BY created_at
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED`,
+      [batchSize]
     )
+
+    for (const row of result.rows) {
+      try {
+        // Dispatch to existing adapter identity handlers
+        await dispatchIdentityEvent(row.source, JSON.parse(row.payload_json), client)
+
+        // Mark processed
+        await client.query(
+          'UPDATE oracle_raw_adapter_events SET processed_at = now() WHERE id = $1',
+          [row.id]
+        )
+        processed++
+      } catch (err) {
+        const newCount = row.error_count + 1
+        const failed = newCount >= MAX_ERROR_COUNT ? 'now()' : 'NULL'
+        await client.query(
+          `UPDATE oracle_raw_adapter_events
+           SET error_count = $1, last_error = $2, failed_at = ${failed}
+           WHERE id = $3`,
+          [newCount, (err as Error).message, row.id]
+        )
+      }
+    }
+
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
   }
 
-  return result.rows.length
+  return processed
 }
 ```
 
-**Poll interval:** Every 5 seconds (configurable). Same non-overlapping loop pattern as the feed worker.
+**Poll interval:** Every 5 seconds (configurable via `RESOLVER_POLL_INTERVAL_MS`). Same non-overlapping loop pattern as the feed worker.
+
+**Failure handling:** Events that fail `MAX_ERROR_COUNT` times get `failed_at` set and are excluded from future polling. Failed events can be inspected via `SELECT * FROM oracle_raw_adapter_events WHERE failed_at IS NOT NULL` and retried by setting `failed_at = NULL, error_count = 0`.
 
 ## 4. Watchlist Refresh
 
@@ -251,9 +301,9 @@ The Helius webhook normalizes transactions and writes raw events. The resolver p
 ### Gateway poller (existing)
 
 **Before:** Worker polls gateway tables → transforms → inserts to ClickHouse directly
-**After:** No change for now. The gateway poller already writes to ClickHouse (OLAP). It can optionally also write identity-relevant events to the staging table for resolver processing.
+**After:** No change. The gateway poller already writes to ClickHouse (OLAP) for feed computation. It does not participate in the adapter sink flow in this cut.
 
-This is a future enhancement — gateway data already flows through the worker pipeline.
+**Explicitly out of scope:** Routing gateway identity-relevant events through the staging table is a future enhancement, not part of the initial no-broker implementation. Do not widen scope.
 
 ## 6. What Does NOT Change
 
@@ -270,7 +320,7 @@ This is a future enhancement — gateway data already flows through the worker p
 
 When event volume grows and you need a real broker:
 
-1. Set `REDPANDA_BROKERS=broker1:9092` (or Upstash Kafka URL)
+1. Set `REDPANDA_BROKERS=broker1:9092` (Redpanda Cloud, Confluent Cloud, or Aiven)
 2. Factory switches from `DirectSink` → `BrokerSink`
 3. Resolver switches from polling staging table → consuming Kafka topic
 4. Watchlist refresh switches from Redis PUBLISH → Kafka topic
