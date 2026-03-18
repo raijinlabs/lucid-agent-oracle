@@ -1,36 +1,66 @@
 import { ponder } from '@/generated'
-import { upsertAgentFromERC8004 } from './db-sink.js'
+import { publishToERC8004 } from './redpanda-sink.js'
+import { computeEventId } from '../../../packages/core/src/types/events.js'
 
 ponder.on('IdentityRegistry:AgentRegistered', async ({ event }) => {
-  await upsertAgentFromERC8004({
+  const erc8004Event = {
+    event_id: computeEventId('erc8004', 'base', event.transaction.hash, Number(event.log.logIndex)),
+    event_type: 'agent_registered',
+    source: 'erc8004',
+    chain: 'base',
+    block_number: Number(event.block.number),
+    tx_hash: event.transaction.hash,
+    log_index: Number(event.log.logIndex),
+    timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
     agent_id: event.args.agentId,
     owner_address: event.args.owner,
     tba_address: event.args.tba === '0x0000000000000000000000000000000000000000' ? null : event.args.tba,
-    chain: 'base',
-    tx_hash: event.transaction.hash,
-    timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
-  })
+    reputation_score: null,
+    validator_address: null,
+    evidence_hash: null,
+    raw_data: JSON.stringify(event.args),
+  }
+  await publishToERC8004(`erc8004:${event.args.agentId}`, erc8004Event)
 })
 
 ponder.on('IdentityRegistry:AgentUpdated', async ({ event }) => {
-  // Update handled by upsert — re-register with same ID
-  await upsertAgentFromERC8004({
-    agent_id: event.args.agentId,
-    owner_address: '', // no owner in update event
-    tba_address: null,
+  const erc8004Event = {
+    event_id: computeEventId('erc8004', 'base', event.transaction.hash, Number(event.log.logIndex)),
+    event_type: 'agent_updated',
+    source: 'erc8004',
     chain: 'base',
+    block_number: Number(event.block.number),
     tx_hash: event.transaction.hash,
+    log_index: Number(event.log.logIndex),
     timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
-  })
+    agent_id: event.args.agentId,
+    owner_address: '',
+    tba_address: null,
+    reputation_score: null,
+    validator_address: null,
+    evidence_hash: null,
+    raw_data: JSON.stringify(event.args),
+  }
+  await publishToERC8004(`erc8004:${event.args.agentId}`, erc8004Event)
 })
 
 ponder.on('IdentityRegistry:OwnershipTransferred', async ({ event }) => {
-  await upsertAgentFromERC8004({
+  const erc8004Event = {
+    event_id: computeEventId('erc8004', 'base', event.transaction.hash, Number(event.log.logIndex)),
+    event_type: 'ownership_transferred',
+    source: 'erc8004',
+    chain: 'base',
+    block_number: Number(event.block.number),
+    tx_hash: event.transaction.hash,
+    log_index: Number(event.log.logIndex),
+    timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
     agent_id: event.args.agentId,
     owner_address: event.args.newOwner,
     tba_address: null,
-    chain: 'base',
-    tx_hash: event.transaction.hash,
-    timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
-  })
+    reputation_score: null,
+    validator_address: null,
+    evidence_hash: null,
+    raw_data: JSON.stringify({ ...event.args, old_owner: event.args.previousOwner }),
+  }
+  await publishToERC8004(`erc8004:${event.args.agentId}`, erc8004Event)
 })
