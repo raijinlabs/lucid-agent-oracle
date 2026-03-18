@@ -1,61 +1,75 @@
 /**
- * OpenTelemetry instrumentation — shared across API, worker, webhook-worker.
+ * OpenTelemetry instrumentation — lazy-loaded, fail-safe.
  *
- * Must be imported BEFORE any other modules (Fastify, pg, redis, etc.)
- * so that auto-instrumentation can patch them.
- *
- * Usage:
- *   node --import tsx/esm --require ./telemetry-register.cjs apps/api/src/server.ts
- *   Or: import './telemetry.js' as the FIRST line of the entry point.
+ * Only imports OTel SDK when OTEL_ENABLED !== 'false'.
+ * Crashes in OTel never bring down the API.
  */
-import { NodeSDK } from '@opentelemetry/sdk-node'
-import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
-import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
-import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http'
-import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics'
-import { Resource } from '@opentelemetry/resources'
-import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions'
-
-const OTEL_ENDPOINT = process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? 'http://localhost:4318'
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME ?? 'oracle-api'
-
-const resource = new Resource({
-  [ATTR_SERVICE_NAME]: SERVICE_NAME,
-  [ATTR_SERVICE_VERSION]: '0.1.0',
-  'deployment.environment': process.env.NODE_ENV ?? 'development',
-})
-
-const sdk = new NodeSDK({
-  resource,
-  traceExporter: new OTLPTraceExporter({
-    url: `${OTEL_ENDPOINT}/v1/traces`,
-  }),
-  metricReader: new PeriodicExportingMetricReader({
-    exporter: new OTLPMetricExporter({
-      url: `${OTEL_ENDPOINT}/v1/metrics`,
-    }),
-    exportIntervalMillis: 15_000,
-  }),
-  instrumentations: [
-    getNodeAutoInstrumentations({
-      // Disable noisy fs instrumentation
-      '@opentelemetry/instrumentation-fs': { enabled: false },
-      // Configure HTTP to capture request/response details
-      '@opentelemetry/instrumentation-http': {
-        ignoreIncomingPaths: ['/health', '/metrics'],
-      },
-    }),
-  ],
-})
 
 export function startTelemetry(): void {
   if (process.env.OTEL_ENABLED === 'false') return
-  sdk.start()
-  console.log(`[otel] Telemetry started → ${OTEL_ENDPOINT} (service: ${SERVICE_NAME})`)
+
+  // Dynamic import so OTel modules are only loaded when needed
+  Promise.all([
+    import('@opentelemetry/sdk-node'),
+    import('@opentelemetry/auto-instrumentations-node'),
+    import('@opentelemetry/exporter-trace-otlp-http'),
+    import('@opentelemetry/exporter-metrics-otlp-http'),
+    import('@opentelemetry/sdk-metrics'),
+    import('@opentelemetry/resources'),
+    import('@opentelemetry/semantic-conventions'),
+  ]).then(([
+    { NodeSDK },
+    { getNodeAutoInstrumentations },
+    { OTLPTraceExporter },
+    { OTLPMetricExporter },
+    { PeriodicExportingMetricReader },
+    resourceMod,
+    semconv,
+  ]) => {
+    const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? 'http://localhost:4318'
+    const serviceName = process.env.OTEL_SERVICE_NAME ?? 'oracle-api'
+
+    // Handle different @opentelemetry/resources export shapes
+    const Resource = (resourceMod as any).Resource ?? (resourceMod as any).default?.Resource
+    const ATTR_SERVICE_NAME = (semconv as any).ATTR_SERVICE_NAME ?? 'service.name'
+    const ATTR_SERVICE_VERSION = (semconv as any).ATTR_SERVICE_VERSION ?? 'service.version'
+
+    const resource = Resource
+      ? new Resource({
+          [ATTR_SERVICE_NAME]: serviceName,
+          [ATTR_SERVICE_VERSION]: '0.1.0',
+          'deployment.environment': process.env.NODE_ENV ?? 'development',
+        })
+      : undefined
+
+    const sdk = new NodeSDK({
+      resource,
+      traceExporter: new OTLPTraceExporter({ url: `${endpoint}/v1/traces` }),
+      metricReader: new PeriodicExportingMetricReader({
+        exporter: new OTLPMetricExporter({ url: `${endpoint}/v1/metrics` }),
+        exportIntervalMillis: 15_000,
+      }),
+      instrumentations: [
+        getNodeAutoInstrumentations({
+          '@opentelemetry/instrumentation-fs': { enabled: false },
+          '@opentelemetry/instrumentation-http': {
+            ignoreIncomingPaths: ['/health', '/metrics'],
+          },
+        }),
+      ],
+    })
+
+    sdk.start()
+    console.log(`[otel] Telemetry started → ${endpoint} (service: ${serviceName})`)
+
+    // Store for shutdown
+    ;(globalThis as any).__otelSdk = sdk
+  }).catch((err) => {
+    console.warn('[otel] Failed to start telemetry (non-fatal):', (err as Error).message)
+  })
 }
 
 export async function shutdownTelemetry(): Promise<void> {
-  await sdk.shutdown()
+  const sdk = (globalThis as any).__otelSdk
+  if (sdk) await sdk.shutdown().catch(() => {})
 }
-
-export { sdk }
