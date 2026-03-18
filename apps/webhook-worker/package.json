@@ -1,0 +1,19 @@
+{
+  "name": "@lucid/webhook-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@lucid/oracle-core": "*",
+    "pg": "^8.13.0",
+    "redis": "^4.7.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "vitest": "^3.2.4"
+  }
+}
