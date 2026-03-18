@@ -4,7 +4,15 @@ export { encodeOnChainValue, type PublicationRequest, type OnChainValue } from '
 
 // Services
 export { computeConfidence, computeFreshnessScore, computeStalenessRisk } from './services/confidence-service.js'
-export { AttestationService, type ReportPayload, type ReportEnvelope } from './services/attestation-service.js'
+export {
+  AttestationService,
+  MultiSignerAttestationService,
+  SignerSetRegistry,
+  signerSetRegistry,
+  type ReportPayload,
+  type ReportEnvelope,
+  type SignerSet,
+} from './services/attestation-service.js'
 
 // Feeds
 export { computeAEGDP, type AEGDPInputs, type AEGDPResult } from './feeds/aegdp.js'

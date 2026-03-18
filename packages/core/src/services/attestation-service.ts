@@ -34,6 +34,40 @@ interface AttestationConfig {
   seed?: string
 }
 
+// ── Signer Set ───────────────────────────────────────────────
+
+/** A named group of signers with a quorum threshold. */
+export interface SignerSet {
+  /** Unique identifier, e.g. 'ss_lucid_v1', 'ss_multi_v1' */
+  id: string
+  /** Required number of valid signatures for a report to be accepted */
+  quorum: number
+  /** Public keys (hex) of authorized signers */
+  signers: string[]
+}
+
+/** Registry of known signer sets for verification. */
+export class SignerSetRegistry {
+  private sets = new Map<string, SignerSet>()
+
+  register(set: SignerSet): void {
+    if (set.quorum < 1) throw new Error(`Quorum must be >= 1, got ${set.quorum}`)
+    if (set.quorum > set.signers.length) throw new Error(`Quorum ${set.quorum} exceeds signer count ${set.signers.length}`)
+    this.sets.set(set.id, set)
+  }
+
+  get(id: string): SignerSet | undefined {
+    return this.sets.get(id)
+  }
+
+  has(id: string): boolean {
+    return this.sets.has(id)
+  }
+}
+
+/** Global signer set registry. */
+export const signerSetRegistry = new SignerSetRegistry()
+
 /**
  * Ed25519 attestation service for signing oracle reports.
  * Uses @noble/ed25519 v2+ (synchronous mode).
@@ -100,6 +134,106 @@ export class AttestationService {
 
   private canonicalize(obj: unknown): string {
     return canonicalStringify(obj)
+  }
+}
+
+// ── Multi-Signer Attestation ─────────────────────────────────
+
+interface MultiSignerConfig {
+  /** One or more hex-encoded 32-byte private keys */
+  privateKeysHex: string[]
+  /** Signer set ID for the envelope (registered in SignerSetRegistry) */
+  signerSetId: string
+}
+
+/**
+ * Multi-signer attestation service.
+ * Signs reports with N keys and produces N signatures in the envelope.
+ * Verifies against the signer set's quorum threshold.
+ */
+export class MultiSignerAttestationService {
+  private readonly signers: AttestationService[]
+  private readonly signerSetId: string
+
+  constructor(config: MultiSignerConfig) {
+    if (config.privateKeysHex.length === 0) {
+      throw new Error('At least one private key is required')
+    }
+    this.signerSetId = config.signerSetId
+    this.signers = config.privateKeysHex.map(
+      (hex) => new AttestationService({ privateKeyHex: hex }),
+    )
+  }
+
+  /** Sign a report with all configured signers. */
+  signReport(payload: ReportPayload): ReportEnvelope {
+    const message = canonicalStringify(payload)
+    const msgBytes = new TextEncoder().encode(message)
+
+    const signatures = this.signers.map((signer) => {
+      const sig = ed.sign(msgBytes, (signer as any).privateKey)
+      return {
+        signer: signer.getPublicKey(),
+        sig: bytesToHex(sig),
+      }
+    })
+
+    return {
+      ...payload,
+      signer_set_id: this.signerSetId,
+      signatures,
+    }
+  }
+
+  /**
+   * Verify a report envelope against the registered signer set.
+   * Returns true if at least `quorum` signatures are valid AND from authorized signers.
+   */
+  verifyReport(envelope: ReportEnvelope): { valid: boolean; validCount: number; quorum: number } {
+    const set = signerSetRegistry.get(envelope.signer_set_id)
+    if (!set) {
+      return { valid: false, validCount: 0, quorum: 0 }
+    }
+
+    const { signer_set_id, signatures, ...payload } = envelope
+    const message = canonicalStringify(payload as ReportPayload)
+    const msgBytes = new TextEncoder().encode(message)
+
+    let validCount = 0
+    for (const { signer, sig } of signatures) {
+      // Must be an authorized signer
+      if (!set.signers.includes(signer)) continue
+      const isValid = ed.verify(hexToBytes(sig), msgBytes, hexToBytes(signer))
+      if (isValid) validCount++
+    }
+
+    return {
+      valid: validCount >= set.quorum,
+      validCount,
+      quorum: set.quorum,
+    }
+  }
+
+  /** Get all public keys for this multi-signer instance. */
+  getPublicKeys(): string[] {
+    return this.signers.map((s) => s.getPublicKey())
+  }
+
+  /** Create from ORACLE_ATTESTATION_KEYS env var (comma-separated hex keys). */
+  static fromEnv(signerSetId: string = 'ss_multi_v1'): MultiSignerAttestationService {
+    const keysRaw = process.env.ORACLE_ATTESTATION_KEYS
+    if (keysRaw) {
+      const keys = keysRaw.split(',').map((k) => k.trim()).filter(Boolean)
+      if (keys.length > 0) {
+        return new MultiSignerAttestationService({ privateKeysHex: keys, signerSetId })
+      }
+    }
+    // Fallback to single key
+    const singleKey = process.env.ORACLE_ATTESTATION_KEY
+    if (singleKey) {
+      return new MultiSignerAttestationService({ privateKeysHex: [singleKey], signerSetId: 'ss_lucid_v1' })
+    }
+    throw new Error('ORACLE_ATTESTATION_KEYS or ORACLE_ATTESTATION_KEY must be set')
   }
 }
 
