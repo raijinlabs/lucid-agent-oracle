@@ -178,7 +178,7 @@ async function handleMetadataSet(
   // Store in metadata_json keyed by human-readable name
   await db.query(
     `UPDATE oracle_agent_entities
-     SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || jsonb_build_object($1, $2),
+     SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || jsonb_build_object($1::text, $2::text),
          updated_at = now()
      WHERE id = $3`,
     [keyName || event.key_hash || 'unknown', decodedValue, entityId],
@@ -232,11 +232,11 @@ async function handleNewFeedback(
     `INSERT INTO oracle_agent_feedback
      (agent_entity, chain, client_address, feedback_index, value, value_decimals,
       tag1, tag2, endpoint, feedback_uri, feedback_hash, tx_hash, block_number, event_timestamp)
-     VALUES ($1, 'base', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     VALUES ($1, 'base', $2, $3::int, $4::int, $5::smallint, $6, $7, $8, $9, $10, $11, $12::bigint, $13::timestamptz)
      ON CONFLICT (agent_entity, chain, feedback_index) DO NOTHING`,
-    [entityId, event.client_address, event.feedback_index, event.value, event.value_decimals,
-     event.tag1, event.tag2, event.endpoint, event.feedback_uri, event.feedback_hash,
-     event.tx_hash, event.block_number, event.timestamp],
+    [entityId, event.client_address, event.feedback_index ?? 0, event.value ?? 0, event.value_decimals ?? 0,
+     event.tag1 ?? '', event.tag2 ?? '', event.endpoint ?? '', event.feedback_uri ?? '', event.feedback_hash ?? '',
+     event.tx_hash ?? '', event.block_number ?? 0, event.timestamp ?? new Date().toISOString()],
   )
 
   // Update agent's reputation summary
