@@ -53,7 +53,7 @@ ponder.on('IdentityRegistry:MetadataSet', async ({ event }) => {
     event_timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
     payload_json: JSON.stringify({
       agent_id: event.args.agentId.toString(),
-      key: event.args.key,
+      key_hash: event.args.keyHash, // keccak256 of the key string (indexed)
       value: event.args.value,
     }),
     block_number: Number(event.block.number),

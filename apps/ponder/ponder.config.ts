@@ -27,7 +27,7 @@ const IDENTITY_REGISTRY_ABI = [
     name: 'MetadataSet',
     inputs: [
       { name: 'agentId', type: 'uint256', indexed: true },
-      { name: 'key', type: 'string', indexed: false },
+      { name: 'keyHash', type: 'string', indexed: true }, // indexed string → topic is keccak256
       { name: 'value', type: 'string', indexed: false },
       { name: 'data', type: 'bytes', indexed: false },
     ],
