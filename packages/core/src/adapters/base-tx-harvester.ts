@@ -151,7 +151,7 @@ export async function harvestBaseTransactions(
 
     // Swap reconstruction — group transfers by tx_hash
     if (config.enableSwapReconstruction && harvested > 0) {
-      await reconstructSwaps(client, fromBlock, toBlock)
+      await classifyTransactions(client, fromBlock, toBlock)
     }
 
     // Resolve unknown tokens
@@ -173,39 +173,138 @@ export async function harvestBaseTransactions(
 }
 
 /**
- * Reconstruct DEX swaps from grouped ERC-20 transfers.
- * A swap = 2+ transfers in the same tx with different tokens.
+ * Classify transactions — honest heuristic, NOT reliable trade detection.
+ *
+ * Transfer grouping by tx_hash is a useful heuristic for swap-like transactions.
+ * It is NOT definitive — LP adds, bridge movements, vault deposits, and router
+ * churn can all look like swaps under this classification.
+ *
+ * Confidence levels:
+ *   high   — 2 transfers, different tokens, one in + one out (classic swap pattern)
+ *   medium — 3+ transfers with mixed directions and tokens (aggregator/multi-hop)
+ *   low    — ambiguous pattern (could be LP, bridge, vault, etc.)
  */
-async function reconstructSwaps(client: pg.PoolClient, fromBlock: number, toBlock: number): Promise<void> {
+async function classifyTransactions(client: pg.PoolClient, fromBlock: number, toBlock: number): Promise<void> {
   // Find transactions with 2+ unclassified transfers
   const groups = await client.query(
     `SELECT tx_hash, agent_entity,
             count(*) as cnt,
-            count(DISTINCT token_address) as distinct_tokens
+            count(DISTINCT token_address) as distinct_tokens,
+            count(DISTINCT direction) as distinct_directions,
+            bool_or(direction = 'inbound') as has_inbound,
+            bool_or(direction = 'outbound') as has_outbound
      FROM oracle_wallet_transactions
      WHERE chain = 'base' AND block_number BETWEEN $1 AND $2 AND tx_type IS NULL
      GROUP BY tx_hash, agent_entity
-     HAVING count(*) >= 2 AND count(DISTINCT token_address) >= 2`,
+     HAVING count(*) >= 2`,
     [fromBlock, toBlock],
   )
 
   for (const g of groups.rows) {
-    const txType = (g.cnt as number) > 2 ? 'multi_hop_leg' : 'swap_leg'
+    const cnt = g.cnt as number
+    const distinctTokens = g.distinct_tokens as number
+    const hasInbound = g.has_inbound as boolean
+    const hasOutbound = g.has_outbound as boolean
+
+    let txType: string
+    let confidence: string
+
+    if (distinctTokens >= 2 && hasInbound && hasOutbound) {
+      // Classic swap pattern: different tokens, bidirectional
+      if (cnt === 2) {
+        txType = 'swap'
+        confidence = 'high'
+      } else {
+        txType = 'multi_hop_swap'
+        confidence = 'medium'
+      }
+    } else if (distinctTokens >= 2 && cnt > 2) {
+      // Could be LP add/remove, bridge, or aggregator routing
+      txType = 'contract_interaction'
+      confidence = 'low'
+    } else {
+      txType = 'unknown'
+      confidence = 'low'
+    }
+
     await client.query(
       `UPDATE oracle_wallet_transactions
-       SET tx_type = $1, swap_group_id = $2
-       WHERE chain = 'base' AND tx_hash = $2 AND agent_entity = $3 AND tx_type IS NULL`,
-      [txType, g.tx_hash, g.agent_entity],
+       SET tx_type = $1, swap_group_id = $2, classification_confidence = $3
+       WHERE chain = 'base' AND tx_hash = $2 AND agent_entity = $4 AND tx_type IS NULL`,
+      [txType, g.tx_hash, confidence, g.agent_entity],
     )
+
+    // For high-confidence swaps: compute execution delta and derive price observations
+    if (txType === 'swap' && confidence === 'high') {
+      await deriveSwapPriceObservation(client, g.tx_hash as string, g.agent_entity as string)
+    }
   }
 
   // Mark remaining single transfers
   await client.query(
     `UPDATE oracle_wallet_transactions
-     SET tx_type = 'transfer'
+     SET tx_type = 'transfer', classification_confidence = 'high'
      WHERE chain = 'base' AND block_number BETWEEN $1 AND $2 AND tx_type IS NULL`,
     [fromBlock, toBlock],
   )
+}
+
+/**
+ * For high-confidence swaps with a stablecoin leg, derive a price observation
+ * for the non-stablecoin token. Also compute execution_delta_usd.
+ */
+async function deriveSwapPriceObservation(client: pg.PoolClient, txHash: string, agentEntity: string): Promise<void> {
+  const legs = await client.query(
+    `SELECT direction, token_address, token_symbol, token_decimals, amount, amount_usd, block_number
+     FROM oracle_wallet_transactions
+     WHERE chain = 'base' AND tx_hash = $1 AND agent_entity = $2
+     ORDER BY log_index`,
+    [txHash, agentEntity],
+  )
+  if (legs.rows.length < 2) return
+
+  const inbound = legs.rows.find((r) => r.direction === 'inbound')
+  const outbound = legs.rows.find((r) => r.direction === 'outbound')
+  if (!inbound || !outbound) return
+
+  // Compute execution delta if both sides have USD values
+  if (inbound.amount_usd != null && outbound.amount_usd != null) {
+    const delta = Number(inbound.amount_usd) - Number(outbound.amount_usd)
+    await client.query(
+      `UPDATE oracle_wallet_transactions SET execution_delta_usd = $1
+       WHERE chain = 'base' AND tx_hash = $2 AND agent_entity = $3 AND direction = 'inbound'`,
+      [delta, txHash, agentEntity],
+    )
+  }
+
+  // Derive price observation from stablecoin leg
+  // If one side is a stablecoin, the other side's price can be inferred
+  const stableLeg = [inbound, outbound].find((l) =>
+    ['USDC', 'USDT', 'DAI', 'USDbC'].includes(l.token_symbol ?? ''),
+  )
+  const otherLeg = [inbound, outbound].find((l) => l !== stableLeg)
+
+  if (stableLeg && otherLeg && stableLeg.token_decimals && otherLeg.token_decimals) {
+    const stableAmount = Number(stableLeg.amount) / Math.pow(10, stableLeg.token_decimals)
+    const otherAmount = Number(otherLeg.amount) / Math.pow(10, otherLeg.token_decimals)
+
+    if (otherAmount > 0 && stableAmount > 0) {
+      const derivedPrice = stableAmount / otherAmount
+
+      await client.query(
+        `INSERT INTO oracle_price_observations (chain, token_address, price_usd, source, confidence, observed_at, block_number, tx_hash)
+         VALUES ('base', $1, $2, 'stablecoin_leg', 'high', to_timestamp($3), $3, $4)`,
+        [otherLeg.token_address, derivedPrice, otherLeg.block_number, txHash],
+      )
+
+      // Update token registry with latest price
+      await client.query(
+        `UPDATE oracle_token_registry SET last_known_usd_price = $1, price_updated_at = now()
+         WHERE chain = 'base' AND token_address = $2`,
+        [derivedPrice, otherLeg.token_address],
+      )
+    }
+  }
 }
 
 async function getCurrentBlock(rpcUrl: string): Promise<number> {

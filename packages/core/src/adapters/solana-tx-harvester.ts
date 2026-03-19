@@ -101,7 +101,9 @@ export async function harvestSolanaTransactions(
 
         for (const tx of txs) {
           const timestamp = new Date(tx.timestamp * 1000).toISOString()
-          const txType = tx.type === 'SWAP' ? 'swap_leg' : 'transfer'
+          // Helius pre-classifies — higher confidence than EVM heuristics
+          const txType = tx.type === 'SWAP' ? 'swap' : 'transfer'
+          const classConfidence = tx.type === 'SWAP' ? 'high' : 'high' // Helius classification is reliable
           const swapGroupId = tx.type === 'SWAP' ? tx.signature : null
 
           // Process token transfers
@@ -119,16 +121,19 @@ export async function harvestSolanaTransactions(
               const token = tokenRegistry.lookup('solana', t.mint)
               const rawAmount = String(Math.round(t.tokenAmount * Math.pow(10, token?.decimals ?? 9)))
 
+              const usdVal = tokenRegistry.getUsdValue('solana', t.mint, rawAmount)
+              const valConf = token?.isStablecoin ? 'exact' : (usdVal != null ? 'medium' : 'none')
+
               await client.query(
                 `INSERT INTO oracle_wallet_transactions
                  (agent_entity, chain, wallet_address, tx_hash, block_number, log_index, direction, counterparty,
-                  token_address, token_symbol, token_decimals, amount, amount_usd, event_timestamp, tx_type, swap_group_id)
-                 VALUES ($1, 'solana', $2, $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                  token_address, token_symbol, token_decimals, amount, amount_usd, event_timestamp,
+                  tx_type, swap_group_id, classification_confidence, valuation_confidence)
+                 VALUES ($1, 'solana', $2, $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                  ON CONFLICT (chain, tx_hash, log_index) DO NOTHING`,
                 [entityId, address, tx.signature, i, direction, counterparty,
-                 t.mint, token?.symbol ?? null, token?.decimals ?? null, rawAmount,
-                 tokenRegistry.getUsdValue('solana', t.mint, rawAmount),
-                 timestamp, txType, swapGroupId],
+                 t.mint, token?.symbol ?? null, token?.decimals ?? null, rawAmount, usdVal,
+                 timestamp, txType, swapGroupId, classConfidence, valConf],
               )
               harvested++
             }
