@@ -407,4 +407,22 @@ export function registerAgentRoutes(
       },
     })
   })
+
+  // ---- GET /v1/oracle/agents/stats (Free) ----
+  app.get('/v1/oracle/agents/stats', {
+    schema: { tags: ['agents'], summary: 'Global agent statistics' },
+    config: { rateLimit: { max: 60 } },
+  }, async (_request, reply) => {
+    const result = await db.query(`
+      SELECT
+        count(*) as total_agents,
+        count(display_name) as named_agents,
+        count(CASE WHEN metadata_json->>'active' = 'true' THEN 1 END) as active_agents,
+        (SELECT count(*) FROM oracle_wallet_mappings WHERE removed_at IS NULL) as total_wallets,
+        (SELECT count(*) FROM oracle_agent_feedback) as total_feedback,
+        (SELECT count(*) FROM oracle_wallet_transactions) as total_transactions
+      FROM oracle_agent_entities
+    `)
+    return reply.send(result.rows[0])
+  })
 }
