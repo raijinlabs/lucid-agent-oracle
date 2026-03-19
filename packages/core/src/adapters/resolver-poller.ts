@@ -51,7 +51,9 @@ export async function processAdapterEvents(
 
     for (const row of result.rows) {
       try {
-        // Merge row metadata with payload so handlers get the full event shape
+        // Savepoint isolates each event — one failure doesn't abort the batch
+        await client.query('SAVEPOINT event_sp')
+
         const fullEvent = {
           ...(typeof row.payload_json === 'string' ? JSON.parse(row.payload_json) : row.payload_json),
           event_type: row.event_type,
@@ -69,8 +71,10 @@ export async function processAdapterEvents(
           'UPDATE oracle_raw_adapter_events SET processed_at = now() WHERE id = $1',
           [row.id],
         )
+        await client.query('RELEASE SAVEPOINT event_sp')
         processed++
       } catch (err) {
+        await client.query('ROLLBACK TO SAVEPOINT event_sp')
         const newCount = (row.error_count ?? 0) + 1
         if (newCount >= MAX_ERROR_COUNT) {
           await client.query(

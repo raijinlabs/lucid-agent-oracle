@@ -25,7 +25,7 @@ describe('Built-in adapter definitions', () => {
   describe('erc8004Adapter', () => {
     it('has correct source and metadata', () => {
       expect(erc8004Adapter.source).toBe('erc8004')
-      expect(erc8004Adapter.version).toBe(1)
+      expect(erc8004Adapter.version).toBe(2)
       expect(erc8004Adapter.topic).toBe(TOPICS.RAW_ERC8004)
       expect(erc8004Adapter.chains).toContain('base')
     })
@@ -33,9 +33,9 @@ describe('Built-in adapter definitions', () => {
     it('has identity handler for all ERC-8004 event types', () => {
       expect(erc8004Adapter.identity).toBeDefined()
       expect(erc8004Adapter.identity!.handles).toContain('agent_registered')
-      expect(erc8004Adapter.identity!.handles).toContain('agent_updated')
+      expect(erc8004Adapter.identity!.handles).toContain('uri_updated')
+      expect(erc8004Adapter.identity!.handles).toContain('metadata_set')
       expect(erc8004Adapter.identity!.handles).toContain('ownership_transferred')
-      expect(erc8004Adapter.identity!.handles).toContain('reputation_updated')
     })
 
     it('has no webhook', () => {

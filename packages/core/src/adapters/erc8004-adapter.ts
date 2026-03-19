@@ -1,139 +1,158 @@
 import { nanoid } from 'nanoid'
 import type { AdapterDefinition, IdentityHandler, DbClient } from './adapter-types.js'
 import type { RedpandaProducer } from '../clients/redpanda.js'
-import type { ERC8004Event, WatchlistUpdate } from '../types/identity.js'
 import { TOPICS } from '../clients/redpanda.js'
 
-/** Identity handler for ERC-8004 events — creates entities, wallets, and links */
+/**
+ * ERC-8004 Identity Handler — processes real events from Base mainnet.
+ *
+ * Events (from resolved staging row):
+ *   agent_registered: { agent_id, agent_uri, owner_address }
+ *   uri_updated:      { agent_id, agent_uri, owner_address }
+ *   metadata_set:     { agent_id, key_hash, value }
+ *   ownership_transferred: { agent_id, previous_owner, new_owner }
+ *
+ * All events also carry: event_type, tx_hash, block_number, chain, source
+ */
+
 const erc8004IdentityHandler: IdentityHandler = {
-  handles: ['agent_registered', 'agent_updated', 'ownership_transferred', 'reputation_updated'],
+  handles: ['agent_registered', 'uri_updated', 'metadata_set', 'ownership_transferred'],
 
   async handleEvent(
     raw: Record<string, unknown>,
     db: DbClient,
-    producer: RedpandaProducer,
+    producer: RedpandaProducer | null,
   ): Promise<void> {
-    const event = raw as unknown as ERC8004Event
+    const event = raw as Record<string, any>
 
     switch (event.event_type) {
       case 'agent_registered':
         return handleAgentRegistered(event, db, producer)
-      case 'agent_updated':
-        return handleAgentUpdated(event, db)
-      case 'reputation_updated':
-        return handleReputationUpdated(event, db)
+      case 'uri_updated':
+        return handleURIUpdated(event, db)
+      case 'metadata_set':
+        return handleMetadataSet(event, db)
       case 'ownership_transferred':
         return handleOwnershipTransferred(event, db, producer)
     }
   },
 }
 
-async function handleAgentRegistered(
-  event: ERC8004Event,
+async function getOrCreateEntity(
   db: DbClient,
-  producer: RedpandaProducer,
-): Promise<void> {
+  agentId: string,
+): Promise<string> {
   const existing = await db.query(
     'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
-    [event.agent_id],
+    [agentId],
   )
+  if (existing.rows.length > 0) return existing.rows[0].id as string
 
-  let entityId: string
-  if (existing.rows.length > 0) {
-    entityId = existing.rows[0].id as string
-  } else {
-    const id = `ae_${nanoid(12)}`
+  const id = `ae_${nanoid(12)}`
+  await db.query(
+    'INSERT INTO oracle_agent_entities (id, erc8004_id, created_at, updated_at) VALUES ($1, $2, now(), now())',
+    [id, agentId],
+  )
+  return id
+}
+
+async function handleAgentRegistered(
+  event: Record<string, any>,
+  db: DbClient,
+  producer: RedpandaProducer | null,
+): Promise<void> {
+  const agentId = String(event.agent_id)
+  const entityId = await getOrCreateEntity(db, agentId)
+
+  // Store agent_uri on the entity
+  if (event.agent_uri) {
     await db.query(
-      'INSERT INTO oracle_agent_entities (id, erc8004_id, created_at, updated_at) VALUES ($1, $2, now(), now())',
-      [id, event.agent_id],
+      'UPDATE oracle_agent_entities SET agent_uri = $1, updated_at = now() WHERE id = $2',
+      [event.agent_uri, entityId],
     )
-    entityId = id
   }
 
-  if (event.tba_address) {
-    await upsertWalletMapping(db, entityId, 'base', event.tba_address, 'erc8004_tba', event.tx_hash)
-    await publishWatchlistUpdate(producer, 'add', 'base', event.tba_address, entityId)
+  // Map owner wallet
+  if (event.owner_address) {
+    await upsertWalletMapping(db, entityId, 'base', event.owner_address, 'erc8004_owner', event.tx_hash ?? '')
+    await publishWatchlistUpdate(producer, 'add', 'base', event.owner_address, entityId)
   }
 
-  await upsertWalletMapping(db, entityId, 'base', event.owner_address, 'erc8004_owner', event.tx_hash)
-  await publishWatchlistUpdate(producer, 'add', 'base', event.owner_address, entityId)
-
+  // Identity link
   await db.query(
     `INSERT INTO oracle_identity_links (agent_entity, protocol, protocol_id, link_type, confidence, evidence_json)
      VALUES ($1, 'erc8004', $2, 'on_chain_proof', 1.0, $3)
      ON CONFLICT (protocol, protocol_id) DO NOTHING`,
-    [entityId, event.agent_id, JSON.stringify({ tx_hash: event.tx_hash, block: event.block_number })],
+    [entityId, agentId, JSON.stringify({ tx_hash: event.tx_hash, block: event.block_number })],
   )
 }
 
-async function handleAgentUpdated(event: ERC8004Event, db: DbClient): Promise<void> {
+async function handleURIUpdated(
+  event: Record<string, any>,
+  db: DbClient,
+): Promise<void> {
+  const agentId = String(event.agent_id)
   const existing = await db.query(
     'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
-    [event.agent_id],
+    [agentId],
   )
-  if (existing.rows.length === 0) {
-    console.warn(`[resolver] AgentUpdated for unknown agent: ${event.agent_id}`)
-    return
-  }
-  try {
-    const raw = JSON.parse(event.raw_data)
-    if (raw.metadataUri || raw.name) {
-      await db.query(
-        'UPDATE oracle_agent_entities SET display_name = COALESCE($1, display_name), updated_at = now() WHERE id = $2',
-        [raw.name ?? raw.metadataUri, existing.rows[0].id],
-      )
-    }
-  } catch {
-    // Skip metadata parse errors
-  }
-}
+  if (existing.rows.length === 0) return
 
-async function handleReputationUpdated(event: ERC8004Event, db: DbClient): Promise<void> {
-  const existing = await db.query(
-    'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
-    [event.agent_id],
-  )
-  if (existing.rows.length === 0) {
-    console.warn(`[resolver] ReputationUpdated for unknown agent: ${event.agent_id}`)
-    return
-  }
   await db.query(
-    `UPDATE oracle_agent_entities SET reputation_json = $1, reputation_updated_at = now(), updated_at = now() WHERE id = $2`,
-    [JSON.stringify({ score: event.reputation_score, validator: event.validator_address, evidence: event.evidence_hash }), existing.rows[0].id],
+    'UPDATE oracle_agent_entities SET agent_uri = $1, updated_at = now() WHERE id = $2',
+    [event.agent_uri, existing.rows[0].id],
+  )
+}
+
+async function handleMetadataSet(
+  event: Record<string, any>,
+  db: DbClient,
+): Promise<void> {
+  const agentId = String(event.agent_id)
+  const existing = await db.query(
+    'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
+    [agentId],
+  )
+  if (existing.rows.length === 0) return
+
+  // Store metadata as JSONB — accumulate key/value pairs
+  await db.query(
+    `UPDATE oracle_agent_entities
+     SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || jsonb_build_object($1, $2),
+         updated_at = now()
+     WHERE id = $3`,
+    [event.key_hash ?? 'unknown', event.value ?? '', existing.rows[0].id],
   )
 }
 
 async function handleOwnershipTransferred(
-  event: ERC8004Event,
+  event: Record<string, any>,
   db: DbClient,
-  producer: RedpandaProducer,
+  producer: RedpandaProducer | null,
 ): Promise<void> {
+  const agentId = String(event.agent_id)
   const existing = await db.query(
     'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
-    [event.agent_id],
+    [agentId],
   )
-  if (existing.rows.length === 0) {
-    console.warn(`[resolver] OwnershipTransferred for unknown agent: ${event.agent_id}`)
-    return
-  }
+  if (existing.rows.length === 0) return
   const entityId = existing.rows[0].id as string
 
-  let oldOwner: string | null = null
-  try {
-    const raw = JSON.parse(event.raw_data)
-    oldOwner = raw.old_owner ?? raw.previousOwner ?? null
-  } catch { /* skip */ }
-
-  if (oldOwner) {
+  // Soft-delete old owner's wallet mapping
+  if (event.previous_owner) {
     await db.query(
-      `UPDATE oracle_wallet_mappings SET removed_at = now() WHERE chain = 'base' AND LOWER(address) = LOWER($1) AND removed_at IS NULL`,
-      [oldOwner],
+      `UPDATE oracle_wallet_mappings SET removed_at = now()
+       WHERE chain = 'base' AND LOWER(address) = LOWER($1) AND removed_at IS NULL`,
+      [event.previous_owner],
     )
-    await publishWatchlistUpdate(producer, 'remove', 'base', oldOwner, entityId)
+    await publishWatchlistUpdate(producer, 'remove', 'base', event.previous_owner, entityId)
   }
 
-  await upsertWalletMapping(db, entityId, 'base', event.owner_address, 'erc8004_owner', event.tx_hash)
-  await publishWatchlistUpdate(producer, 'add', 'base', event.owner_address, entityId)
+  // Add new owner's wallet mapping
+  if (event.new_owner) {
+    await upsertWalletMapping(db, entityId, 'base', event.new_owner, 'erc8004_owner', event.tx_hash ?? '')
+    await publishWatchlistUpdate(producer, 'add', 'base', event.new_owner, entityId)
+  }
 }
 
 async function upsertWalletMapping(
@@ -162,18 +181,18 @@ async function publishWatchlistUpdate(
   address: string,
   entityId: string,
 ): Promise<void> {
-  if (!producer) return // No-broker mode — watchlist refresh via Redis or timer
-  const update: WatchlistUpdate = { action, chain, address, agent_entity_id: entityId }
-  await producer.publishJson(TOPICS.WATCHLIST, `${chain}:${address}`, update)
+  if (!producer) return
+  await producer.publishJson(TOPICS.WATCHLIST, `${chain}:${address}`, {
+    action, chain, address, agent_entity_id: entityId,
+  })
 }
 
 /** ERC-8004 adapter — indexes agent identity registry events on Base */
 export const erc8004Adapter: AdapterDefinition = {
   source: 'erc8004',
-  version: 1,
+  version: 2,
   description: 'ERC-8004 Agent Identity Registry on Base',
   topic: TOPICS.RAW_ERC8004,
   chains: ['base'],
   identity: erc8004IdentityHandler,
-  // No webhook — events come from Ponder indexer
 }

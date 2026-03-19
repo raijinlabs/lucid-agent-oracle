@@ -1,38 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { erc8004Adapter } from '../adapters/erc8004-adapter.js'
-import type { ERC8004Event } from '../types/identity.js'
 
 function mockDb() {
   return {
     query: vi.fn().mockResolvedValue({ rows: [] }),
-  }
-}
-
-function mockProducer() {
-  return {
-    publishJson: vi.fn().mockResolvedValue(undefined),
-    publishEvents: vi.fn().mockResolvedValue(undefined),
-  } as any
-}
-
-function makeEvent(overrides: Partial<ERC8004Event> = {}): ERC8004Event {
-  return {
-    event_id: 'test-id',
-    event_type: 'agent_registered',
-    source: 'erc8004',
-    chain: 'base',
-    block_number: 100,
-    tx_hash: '0xabc',
-    log_index: 0,
-    timestamp: new Date('2026-01-01'),
-    agent_id: 'agent-1',
-    owner_address: '0xOwner',
-    tba_address: '0xTBA',
-    reputation_score: null,
-    validator_address: null,
-    evidence_hash: null,
-    raw_data: '{}',
-    ...overrides,
   }
 }
 
@@ -41,96 +12,95 @@ describe('erc8004Adapter identity handler', () => {
 
   it('creates entity and wallet mappings for agent_registered', async () => {
     const db = mockDb()
-    const producer = mockProducer()
-    const event = makeEvent()
+    const event = {
+      event_type: 'agent_registered',
+      agent_id: '42',
+      owner_address: '0xOwner',
+      agent_uri: 'https://example.com/agent.json',
+      tx_hash: '0xabc',
+      block_number: 100,
+    }
 
-    await handler.handleEvent(event as any, db, producer)
+    await handler.handleEvent(event, db, null)
 
     // Should create entity
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO oracle_agent_entities'),
-      expect.arrayContaining([expect.stringContaining('ae_'), 'agent-1']),
+      expect.arrayContaining([expect.stringContaining('ae_'), '42']),
     )
-    // Should create TBA wallet mapping
+    // Should update agent_uri
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO oracle_wallet_mappings'),
-      expect.arrayContaining(['0xTBA', 'erc8004_tba']),
+      expect.stringContaining('UPDATE oracle_agent_entities SET agent_uri'),
+      expect.arrayContaining(['https://example.com/agent.json']),
     )
     // Should create owner wallet mapping
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO oracle_wallet_mappings'),
       expect.arrayContaining(['0xOwner', 'erc8004_owner']),
     )
-    // Should publish watchlist updates
-    expect(producer.publishJson).toHaveBeenCalledTimes(2)
   })
 
-  it('handles agent_updated by updating display name', async () => {
+  it('handles uri_updated by updating agent_uri', async () => {
     const db = mockDb()
     db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_existing' }] })
-    const producer = mockProducer()
 
-    const event = makeEvent({
-      event_type: 'agent_updated',
-      raw_data: JSON.stringify({ name: 'Updated Agent' }),
-    })
+    const event = {
+      event_type: 'uri_updated',
+      agent_id: '42',
+      agent_uri: 'https://new-uri.com/agent.json',
+      owner_address: '0xOwner',
+    }
 
-    await handler.handleEvent(event as any, db, producer)
+    await handler.handleEvent(event, db, null)
 
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE oracle_agent_entities SET display_name'),
-      expect.arrayContaining(['Updated Agent', 'ae_existing']),
+      expect.stringContaining('UPDATE oracle_agent_entities SET agent_uri'),
+      expect.arrayContaining(['https://new-uri.com/agent.json', 'ae_existing']),
     )
   })
 
-  it('updates reputation for reputation_updated', async () => {
+  it('handles metadata_set by accumulating JSONB', async () => {
     const db = mockDb()
     db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_existing' }] })
-    const producer = mockProducer()
 
-    const event = makeEvent({
-      event_type: 'reputation_updated',
-      reputation_score: 8500,
-      validator_address: '0xValidator',
-      evidence_hash: '0xEvidence',
-    })
+    const event = {
+      event_type: 'metadata_set',
+      agent_id: '42',
+      key_hash: '0xabcdef',
+      value: 'some-value',
+    }
 
-    await handler.handleEvent(event as any, db, producer)
+    await handler.handleEvent(event, db, null)
 
     expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE oracle_agent_entities SET reputation_json'),
-      expect.arrayContaining([expect.stringContaining('"score":8500'), 'ae_existing']),
+      expect.stringContaining('metadata_json'),
+      expect.arrayContaining(['0xabcdef', 'some-value', 'ae_existing']),
     )
   })
 
   it('handles ownership_transferred with old owner soft-delete', async () => {
     const db = mockDb()
     db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_existing' }] })
-    const producer = mockProducer()
 
-    const event = makeEvent({
+    const event = {
       event_type: 'ownership_transferred',
-      owner_address: '0xNewOwner',
-      raw_data: JSON.stringify({ old_owner: '0xOldOwner' }),
-    })
+      agent_id: '42',
+      previous_owner: '0xOldOwner',
+      new_owner: '0xNewOwner',
+      tx_hash: '0xdef',
+    }
 
-    await handler.handleEvent(event as any, db, producer)
+    await handler.handleEvent(event, db, null)
 
     // Should soft-delete old owner mapping
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE oracle_wallet_mappings SET removed_at'),
       expect.arrayContaining(['0xOldOwner']),
     )
-    // Should publish remove + add watchlist updates
-    expect(producer.publishJson).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining('0xOldOwner'),
-      expect.objectContaining({ action: 'remove' }),
-    )
-    expect(producer.publishJson).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining('0xNewOwner'),
-      expect.objectContaining({ action: 'add' }),
+    // Should upsert new owner wallet mapping
+    expect(db.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO oracle_wallet_mappings'),
+      expect.arrayContaining(['0xNewOwner', 'erc8004_owner']),
     )
   })
 })
