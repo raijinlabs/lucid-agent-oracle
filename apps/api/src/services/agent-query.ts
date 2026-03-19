@@ -299,6 +299,9 @@ export class AgentQueryService {
       display_name: (r.display_name as string) ?? null,
       erc8004_id: (r.erc8004_id as string) ?? null,
       created_at: String(r.created_at),
+      wallet_count: Number(r.wallet_count ?? 0),
+      protocol_count: Number(r.protocol_count ?? 0),
+      evidence_count: Number(r.evidence_count ?? 0),
     }))
 
     const last = data[data.length - 1]
