@@ -18,6 +18,7 @@ import {
   startURIResolver,
   startTxHarvester,
   startSolanaTxHarvester,
+  startMoralisClassifier,
   dispatchIdentityEvent,
   getIdentityTopics,
   adapterRegistry,
@@ -321,6 +322,14 @@ if (databaseUrl) {
     const solPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
     startSolanaTxHarvester(solPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
     app.log.info('[ingestion:solana] TX harvester started')
+  }
+
+  // Moralis classifier — reclassifies Base transactions with high-accuracy labels
+  const moralisApiKey = process.env.MORALIS_API_KEY
+  if (moralisApiKey) {
+    const moralisPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+    startMoralisClassifier(moralisPool, { apiKey: moralisApiKey, intervalMs: 60_000, batchSize: 20 })
+    app.log.info('[ingestion:moralis] Swap classifier started (high-accuracy)')
   }
 
   // Plan 3A v2: Fail-fast on missing CURSOR_SECRET

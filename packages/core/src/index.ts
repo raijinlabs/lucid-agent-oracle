@@ -43,6 +43,7 @@ export { startTxHarvester, harvestBaseTransactions } from './adapters/base-tx-ha
 export { startSolanaTxHarvester, harvestSolanaTransactions } from './adapters/solana-tx-harvester.js'
 export { TokenRegistry } from './adapters/token-registry.js'
 export { updatePositionLedger, getAgentRealizedDeltas } from './adapters/position-ledger.js'
+export { startMoralisClassifier, classifyWalletTransactions } from './adapters/moralis-classifier.js'
 
 // Identity verification (Plan 4B)
 export type { WalletVerifier } from './identity/wallet-verifier.js'
