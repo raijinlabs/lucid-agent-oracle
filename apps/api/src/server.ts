@@ -306,29 +306,24 @@ if (databaseUrl) {
   startURIResolver(uriResolverPool)
   app.log.info('URI resolver started (resolves agent registration files)')
 
-  // === OPTIONAL MODULE: Trading Activity ===
-  // Enable with ENABLE_TRADING=true. Tracks ERC-20 transfers, swap detection,
-  // position ledger. Requires BASE_RPC_URL and/or HELIUS_API_KEY.
-  if (process.env.ENABLE_TRADING === 'true') {
-    const baseRpcUrl = process.env.BASE_RPC_URL
-    if (baseRpcUrl) {
-      const txPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-      startTxHarvester(txPool, { intervalMs: 30_000, blockBatchSize: 2000, rpcUrl: baseRpcUrl })
-      app.log.info('[trading] Base TX harvester started')
-    }
+  // === OPTIONAL MODULES ===
+  // Each module activates independently when its env vars are present.
+  // No master switch — set the vars you need, skip the rest.
 
-    const heliusApiKey = process.env.HELIUS_API_KEY
-    if (heliusApiKey) {
-      const solPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-      startSolanaTxHarvester(solPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
-      app.log.info('[trading] Solana TX harvester started')
-    }
+  // Base Trading: tracks ERC-20 transfers + swap detection on Base
+  const baseRpcUrl = process.env.BASE_RPC_URL
+  if (baseRpcUrl) {
+    const txPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+    startTxHarvester(txPool, { intervalMs: 30_000, blockBatchSize: 2000, rpcUrl: baseRpcUrl })
+    app.log.info('[module:base-trading] Started — tracking agent wallet ERC-20 transfers')
+  }
 
-    if (!baseRpcUrl && !heliusApiKey) {
-      app.log.warn('[trading] ENABLE_TRADING=true but no RPC URLs set — nothing to harvest')
-    }
-  } else {
-    app.log.info('Trading module disabled (set ENABLE_TRADING=true to enable)')
+  // Solana Trading: tracks agent wallet activity via Helius
+  const heliusApiKey = process.env.HELIUS_API_KEY
+  if (heliusApiKey) {
+    const solPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+    startSolanaTxHarvester(solPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
+    app.log.info('[module:solana-trading] Started — tracking agent wallet activity via Helius')
   }
 
   // Plan 3A v2: Fail-fast on missing CURSOR_SECRET
