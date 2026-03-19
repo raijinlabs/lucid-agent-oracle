@@ -89,6 +89,12 @@ export const AgentSearchQuery = Type.Intersect(
       protocol_id: Type.Optional(Type.String()),
       erc8004_id: Type.Optional(Type.String()),
       q: Type.Optional(Type.String({ maxLength: 200 })),
+      sort: Type.Optional(Type.Union([
+        Type.Literal('newest'),
+        Type.Literal('wallets'),
+        Type.Literal('protocols'),
+        Type.Literal('evidence'),
+      ])),
     }),
   ],
   { $id: 'AgentSearchQuery' },

@@ -57,7 +57,7 @@ export function registerAgentRoutes(
       cursor?: string
     }
 
-    const { wallet, chain, protocol, protocol_id, erc8004_id, q } = query
+    const { wallet, chain, protocol, protocol_id, erc8004_id, q, sort } = query as any
 
     // At least one search param required
     if (!wallet && !protocol && !protocol_id && !erc8004_id && !q) {
@@ -84,6 +84,7 @@ export function registerAgentRoutes(
 
     const result = await service.search({
       wallet, chain, protocol, protocol_id, erc8004_id, q,
+      sort: sort ?? 'newest',
       limit,
       offset: 0,
       cursorValue,

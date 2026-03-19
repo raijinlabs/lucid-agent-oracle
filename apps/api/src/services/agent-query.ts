@@ -43,6 +43,7 @@ export interface SearchParams {
   protocol_id?: string
   erc8004_id?: string
   q?: string
+  sort?: 'newest' | 'wallets' | 'protocols' | 'evidence'
   limit: number
   offset: number
   cursorValue?: string
@@ -211,6 +212,19 @@ export class AgentQueryService {
     }
   }
 
+  private getSortClause(sort?: string): string {
+    switch (sort) {
+      case 'wallets':
+        return '(SELECT count(*) FROM oracle_wallet_mappings wm3 WHERE wm3.agent_entity = ae.id AND wm3.removed_at IS NULL) DESC'
+      case 'protocols':
+        return '(SELECT count(*) FROM oracle_identity_links il3 WHERE il3.agent_entity = ae.id) DESC'
+      case 'evidence':
+        return '(SELECT count(*) FROM oracle_agent_feedback fb3 WHERE fb3.agent_entity = ae.id) DESC'
+      default:
+        return 'ae.created_at DESC'
+    }
+  }
+
   // ---- search ------------------------------------------------------------
 
   async search(params: SearchParams): Promise<CursorResult<AgentSearchResult>> {
@@ -258,8 +272,10 @@ export class AgentQueryService {
     }
 
     if (params.q && params.q !== '*') {
-      conditions.push(`ae.display_name ILIKE ${nextParam()}`)
+      const qParam = nextParam()
+      conditions.push(`(ae.display_name ILIKE ${qParam} OR ae.erc8004_id = ${nextParam()})`)
       values.push(`%${params.q}%`)
+      values.push(params.q) // exact match on erc8004_id
     }
     // q=* is a wildcard — list all agents (no filter added)
 
@@ -286,7 +302,7 @@ export class AgentQueryService {
         (SELECT count(*) FROM oracle_identity_links il2 WHERE il2.agent_entity = ae.id) as protocol_count,
         (SELECT count(*) FROM oracle_agent_feedback fb WHERE fb.agent_entity = ae.id) as evidence_count
       FROM oracle_agent_entities ae ${joinClause} ${whereClause}
-      ORDER BY ae.created_at DESC, ae.id DESC
+      ORDER BY ${this.getSortClause(params.sort)}, ae.id DESC
       LIMIT ${limitParam}`
 
     const { rows } = await this.db.query(dataSql, values)
