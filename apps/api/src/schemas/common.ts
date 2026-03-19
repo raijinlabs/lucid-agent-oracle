@@ -184,6 +184,7 @@ export function registerGlobalErrorHandler(app: FastifyInstance): void {
     }
 
     // Everything else → internal error
+    console.error('[500]', error.message, error.stack?.split('\n')[1]?.trim())
     return sendProblem(reply, status >= 100 && status < 600 ? status : 500, {
       type: 'internal-error',
       title: 'Internal Server Error',
