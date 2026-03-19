@@ -70,20 +70,20 @@ export default createConfig({
       network: 'base',
       abi: IDENTITY_REGISTRY_ABI,
       address: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
-      startBlock: 20_000_000, // TODO: set to actual deployment block
+      startBlock: 41_670_000, // First events found at ~41,671,000 via binary search
     },
     ReputationRegistry: {
       network: 'base',
       abi: REPUTATION_REGISTRY_ABI,
       address: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
-      startBlock: 20_000_000, // TODO: set to actual deployment block
+      startBlock: 41_670_000,
     },
-    // Broad index: all USDC transfers on Base (filtered by watchlist in handler)
+    // USDC transfers on Base — filtered by watchlist in handler (only agent wallets)
     BaseUSDC: {
       network: 'base',
       abi: ERC20_TRANSFER_ABI,
-      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // Base USDC
-      startBlock: 20_000_000,
+      address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      startBlock: 41_670_000, // Same start — only relevant after agents are registered
     },
   },
 })
