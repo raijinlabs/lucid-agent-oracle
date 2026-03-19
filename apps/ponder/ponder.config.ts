@@ -52,15 +52,25 @@ const IDENTITY_REGISTRY_ABI = [
 
 // ERC-8004 Reputation Registry ABI — placeholder until we verify events
 // TODO: Fetch real events from 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63
+// ERC-8004 Reputation Registry ABI — verified against EIP-8004 spec + on-chain topic hash.
+// keccak256("NewFeedback(uint256,address,uint64,int128,uint8,string,string,string,string,string,bytes32)")
+// = 0x6a4a61743519c9d648a14e6493f47dbe3ff1aa29e7785c96c8326a205e58febc ✓
 const REPUTATION_REGISTRY_ABI = [
   {
     type: 'event',
     name: 'NewFeedback',
     inputs: [
       { name: 'agentId', type: 'uint256', indexed: true },
-      { name: 'reviewer', type: 'address', indexed: true },
-      { name: 'rating', type: 'uint8', indexed: false },
+      { name: 'clientAddress', type: 'address', indexed: true },
+      { name: 'feedbackIndex', type: 'uint64', indexed: false },
+      { name: 'value', type: 'int128', indexed: false },
+      { name: 'valueDecimals', type: 'uint8', indexed: false },
+      { name: 'indexedTag1', type: 'string', indexed: true }, // hashed to bytes32 in topic
+      { name: 'tag1', type: 'string', indexed: false },
+      { name: 'tag2', type: 'string', indexed: false },
+      { name: 'endpoint', type: 'string', indexed: false },
       { name: 'feedbackURI', type: 'string', indexed: false },
+      { name: 'feedbackHash', type: 'bytes32', indexed: false },
     ],
   },
 ] as const
@@ -83,12 +93,11 @@ export default createConfig({
       address: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
       startBlock: 41_670_000,
     },
-    // Reputation Registry disabled until we verify its actual event signatures
-    // ReputationRegistry: {
-    //   network: 'base',
-    //   abi: REPUTATION_REGISTRY_ABI,
-    //   address: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
-    //   startBlock: 41_670_000,
-    // },
+    ReputationRegistry: {
+      network: 'base',
+      abi: REPUTATION_REGISTRY_ABI,
+      address: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
+      startBlock: 41_670_000,
+    },
   },
 })

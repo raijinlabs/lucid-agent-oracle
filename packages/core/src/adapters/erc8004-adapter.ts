@@ -16,7 +16,7 @@ import { TOPICS } from '../clients/redpanda.js'
  */
 
 const erc8004IdentityHandler: IdentityHandler = {
-  handles: ['agent_registered', 'uri_updated', 'metadata_set', 'ownership_transferred'],
+  handles: ['agent_registered', 'uri_updated', 'metadata_set', 'ownership_transferred', 'new_feedback'],
 
   async handleEvent(
     raw: Record<string, unknown>,
@@ -34,6 +34,8 @@ const erc8004IdentityHandler: IdentityHandler = {
         return handleMetadataSet(event, db, producer)
       case 'ownership_transferred':
         return handleOwnershipTransferred(event, db, producer)
+      case 'new_feedback':
+        return handleNewFeedback(event, db)
     }
   },
 }
@@ -211,6 +213,48 @@ async function handleOwnershipTransferred(
     await upsertWalletMapping(db, entityId, 'base', event.new_owner, 'onchain_proof', event.tx_hash ?? '')
     await publishWatchlistUpdate(producer, 'add', 'base', event.new_owner, entityId)
   }
+}
+
+async function handleNewFeedback(
+  event: Record<string, any>,
+  db: DbClient,
+): Promise<void> {
+  const agentId = String(event.agent_id)
+  const existing = await db.query(
+    'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
+    [agentId],
+  )
+  if (existing.rows.length === 0) return
+  const entityId = existing.rows[0].id as string
+
+  // Store feedback in oracle_agent_feedback
+  await db.query(
+    `INSERT INTO oracle_agent_feedback
+     (agent_entity, chain, client_address, feedback_index, value, value_decimals,
+      tag1, tag2, endpoint, feedback_uri, feedback_hash, tx_hash, block_number, event_timestamp)
+     VALUES ($1, 'base', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     ON CONFLICT (agent_entity, chain, feedback_index) DO NOTHING`,
+    [entityId, event.client_address, event.feedback_index, event.value, event.value_decimals,
+     event.tag1, event.tag2, event.endpoint, event.feedback_uri, event.feedback_hash,
+     event.tx_hash, event.block_number, event.timestamp],
+  )
+
+  // Update agent's reputation summary
+  await db.query(
+    `UPDATE oracle_agent_entities
+     SET reputation_json = (
+       SELECT jsonb_build_object(
+         'feedback_count', count(*),
+         'avg_value', round(avg(value)::numeric, 2),
+         'latest_tag1', (SELECT tag1 FROM oracle_agent_feedback WHERE agent_entity = $1 ORDER BY event_timestamp DESC LIMIT 1),
+         'latest_tag2', (SELECT tag2 FROM oracle_agent_feedback WHERE agent_entity = $1 ORDER BY event_timestamp DESC LIMIT 1)
+       ) FROM oracle_agent_feedback WHERE agent_entity = $1
+     ),
+     reputation_updated_at = now(),
+     updated_at = now()
+     WHERE id = $1`,
+    [entityId],
+  )
 }
 
 async function upsertWalletMapping(
