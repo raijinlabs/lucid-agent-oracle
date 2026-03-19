@@ -279,8 +279,8 @@ export class AgentQueryService {
     }
     // q=* is a wildcard — list all agents (no filter added)
 
-    // Keyset cursor condition
-    if (params.cursorValue && params.cursorId) {
+    // Keyset cursor condition (only works with default created_at sort)
+    if (params.cursorValue && params.cursorId && (!params.sort || params.sort === 'newest')) {
       const cvParam = nextParam()
       const ciParam = nextParam()
       conditions.push(`(ae.created_at, ae.id) < (${cvParam}, ${ciParam})`)
@@ -297,13 +297,18 @@ export class AgentQueryService {
     const limitParam = nextParam()
     values.push(limit + 1)
 
+    // For non-default sort, use OFFSET pagination (cursor value = offset number)
+    const useOffset = params.sort && params.sort !== 'newest' && params.cursorValue
+    const offsetClause = useOffset ? `OFFSET ${nextParam()}` : ''
+    if (useOffset) values.push(parseInt(String(params.cursorValue), 10) || 0)
+
     const dataSql = `SELECT DISTINCT ae.id, ae.display_name, ae.erc8004_id, ae.created_at,
         (SELECT count(*) FROM oracle_wallet_mappings wm2 WHERE wm2.agent_entity = ae.id AND wm2.removed_at IS NULL) as wallet_count,
         (SELECT count(*) FROM oracle_identity_links il2 WHERE il2.agent_entity = ae.id) as protocol_count,
         (SELECT count(*) FROM oracle_agent_feedback fb WHERE fb.agent_entity = ae.id) as evidence_count
       FROM oracle_agent_entities ae ${joinClause} ${whereClause}
       ORDER BY ${this.getSortClause(params.sort)}, ae.id DESC
-      LIMIT ${limitParam}`
+      LIMIT ${limitParam} ${offsetClause}`
 
     const { rows } = await this.db.query(dataSql, values)
 
@@ -321,10 +326,14 @@ export class AgentQueryService {
     }))
 
     const last = data[data.length - 1]
+    // For non-default sort, cursor is offset-based (next page offset number)
+    const currentOffset = useOffset ? (parseInt(String(params.cursorValue), 10) || 0) : 0
     return {
       data,
       has_more: hasMore,
-      ...(last ? { last_sort_value: last.created_at, last_id: last.id } : {}),
+      ...(last && (!params.sort || params.sort === 'newest')
+        ? { last_sort_value: last.created_at, last_id: last.id }
+        : last ? { last_sort_value: String(currentOffset + limit), last_id: last.id } : {}),
     }
   }
 
