@@ -1,59 +1,66 @@
 import { createConfig } from '@ponder/core'
 import { http } from 'viem'
 
-// ERC-8004 Identity Registry ABI (relevant events only)
+// ERC-8004 Identity Registry ABI — real events from deployed contract on Base
+// Verified via openchain.xyz signature database + on-chain log analysis
 const IDENTITY_REGISTRY_ABI = [
   {
     type: 'event',
-    name: 'AgentRegistered',
+    name: 'Registered',
     inputs: [
-      { name: 'agentId', type: 'bytes32', indexed: true },
+      { name: 'agentId', type: 'uint256', indexed: true },
+      { name: 'agentURI', type: 'string', indexed: false },
       { name: 'owner', type: 'address', indexed: true },
-      { name: 'tba', type: 'address', indexed: false },
     ],
   },
   {
     type: 'event',
-    name: 'AgentUpdated',
+    name: 'URIUpdated',
     inputs: [
-      { name: 'agentId', type: 'bytes32', indexed: true },
-      { name: 'metadataUri', type: 'string', indexed: false },
+      { name: 'agentId', type: 'uint256', indexed: true },
+      { name: 'agentURI', type: 'string', indexed: false },
+      { name: 'owner', type: 'address', indexed: true },
     ],
   },
   {
     type: 'event',
-    name: 'OwnershipTransferred',
+    name: 'MetadataSet',
     inputs: [
-      { name: 'agentId', type: 'bytes32', indexed: true },
-      { name: 'previousOwner', type: 'address', indexed: true },
-      { name: 'newOwner', type: 'address', indexed: true },
+      { name: 'agentId', type: 'uint256', indexed: true },
+      { name: 'key', type: 'string', indexed: false },
+      { name: 'value', type: 'string', indexed: false },
+      { name: 'data', type: 'bytes', indexed: false },
     ],
   },
-] as const
-
-// ERC-8004 Reputation Registry ABI (relevant events only)
-const REPUTATION_REGISTRY_ABI = [
   {
     type: 'event',
-    name: 'ReputationUpdated',
+    name: 'MetadataUpdate',
     inputs: [
-      { name: 'agentId', type: 'bytes32', indexed: true },
-      { name: 'score', type: 'uint256', indexed: false },
-      { name: 'validator', type: 'address', indexed: true },
-      { name: 'evidenceHash', type: 'bytes32', indexed: false },
+      { name: 'tokenId', type: 'uint256', indexed: false },
     ],
   },
-] as const
-
-// Base USDC contract for wallet activity tracking
-const ERC20_TRANSFER_ABI = [
   {
     type: 'event',
     name: 'Transfer',
     inputs: [
       { name: 'from', type: 'address', indexed: true },
       { name: 'to', type: 'address', indexed: true },
-      { name: 'value', type: 'uint256', indexed: false },
+      { name: 'tokenId', type: 'uint256', indexed: true },
+    ],
+  },
+] as const
+
+// ERC-8004 Reputation Registry ABI — placeholder until we verify events
+// TODO: Fetch real events from 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63
+const REPUTATION_REGISTRY_ABI = [
+  {
+    type: 'event',
+    name: 'NewFeedback',
+    inputs: [
+      { name: 'agentId', type: 'uint256', indexed: true },
+      { name: 'reviewer', type: 'address', indexed: true },
+      { name: 'rating', type: 'uint8', indexed: false },
+      { name: 'feedbackURI', type: 'string', indexed: false },
     ],
   },
 ] as const
@@ -61,7 +68,7 @@ const ERC20_TRANSFER_ABI = [
 export default createConfig({
   database: {
     connectionString: process.env.DATABASE_URL!,
-    poolConfig: { max: 3 }, // Supabase session pooler limits: keep very low
+    poolConfig: { max: 3 },
   },
   networks: {
     base: {
@@ -74,21 +81,13 @@ export default createConfig({
       network: 'base',
       abi: IDENTITY_REGISTRY_ABI,
       address: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
-      startBlock: 41_670_000, // First events found at ~41,671,000 via binary search
-    },
-    ReputationRegistry: {
-      network: 'base',
-      abi: REPUTATION_REGISTRY_ABI,
-      address: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
       startBlock: 41_670_000,
     },
-    // USDC transfers on Base — DISABLED until agent wallets exist in watchlist.
-    // Indexing all USDC transfers is extremely expensive (millions of events/day,
-    // high RPC + DB cost). Enable only when watchlist has addresses to filter on.
-    // BaseUSDC: {
+    // Reputation Registry disabled until we verify its actual event signatures
+    // ReputationRegistry: {
     //   network: 'base',
-    //   abi: ERC20_TRANSFER_ABI,
-    //   address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    //   abi: REPUTATION_REGISTRY_ABI,
+    //   address: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
     //   startBlock: 41_670_000,
     // },
   },
