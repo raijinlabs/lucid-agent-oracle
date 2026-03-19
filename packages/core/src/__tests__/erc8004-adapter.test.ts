@@ -12,6 +12,8 @@ describe('erc8004Adapter identity handler', () => {
 
   it('creates entity and wallet mappings for agent_registered', async () => {
     const db = mockDb()
+    // getOrCreateEntity: INSERT returns the new row
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_new123' }] })
     const event = {
       event_type: 'agent_registered',
       agent_id: '42',
@@ -56,6 +58,7 @@ describe('erc8004Adapter identity handler', () => {
 
   it('handles metadata_set with agentWallet — decodes address and creates wallet mapping', async () => {
     const db = mockDb()
+    // handleMetadataSet does SELECT to find entity
     db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_existing' }] })
 
     await handler.handleEvent({
@@ -71,15 +74,16 @@ describe('erc8004Adapter identity handler', () => {
       expect.stringContaining('INSERT INTO oracle_wallet_mappings'),
       expect.arrayContaining(['0x67722c823010ceb4bed5325fe109196c0f67d053', 'onchain_proof']),
     )
-    // Should store in metadata_json
+    // Should store in metadata_json with JS-built JSON string
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('metadata_json'),
-      expect.arrayContaining(['agentWallet']),
+      expect.arrayContaining([expect.stringContaining('agentWallet')]),
     )
   })
 
   it('handles metadata_set with ecosystem — stores decoded string', async () => {
     const db = mockDb()
+    // handleMetadataSet does SELECT to find entity
     db.query.mockResolvedValueOnce({ rows: [{ id: 'ae_existing' }] })
 
     await handler.handleEvent({
@@ -89,9 +93,10 @@ describe('erc8004Adapter identity handler', () => {
       data: '0x4f6c617300000000000000000000000000000000000000000000000000000000',
     }, db, null)
 
+    // metadata_json now receives a JS-built JSON string containing both key and value
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('metadata_json'),
-      expect.arrayContaining(['ecosystem', 'Olas']),
+      expect.arrayContaining([JSON.stringify({ ecosystem: 'Olas' })]),
     )
   })
 

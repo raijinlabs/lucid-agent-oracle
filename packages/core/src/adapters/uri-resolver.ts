@@ -45,7 +45,6 @@ export async function resolveAgentURIs(
     // Advisory lock — only one resolver instance at a time
     const lockResult = await client.query("SELECT pg_try_advisory_lock(hashtext('uri_resolver'))")
     if (!lockResult.rows[0].pg_try_advisory_lock) {
-      client.release()
       return 0
     }
 
@@ -126,9 +125,9 @@ export async function resolveAgentURIs(
         await client.query(
           `UPDATE oracle_agent_entities
            SET uri_resolved_at = now(),
-               metadata_json = COALESCE(metadata_json, '{}'::jsonb) || jsonb_build_object('uri_error', $1)
+               metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $1::jsonb
            WHERE id = $2`,
-          [(err as Error).message.slice(0, 200), row.id],
+          [JSON.stringify({ uri_error: (err as Error).message.slice(0, 200) }), row.id],
         )
       }
 

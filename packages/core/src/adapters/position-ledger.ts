@@ -24,7 +24,6 @@ export async function updatePositionLedger(pool: pg.Pool): Promise<number> {
   try {
     const lockResult = await client.query("SELECT pg_try_advisory_lock(hashtext('position_ledger'))")
     if (!lockResult.rows[0].pg_try_advisory_lock) {
-      client.release()
       return 0
     }
 
@@ -71,7 +70,7 @@ export async function updatePositionLedger(pool: pg.Pool): Promise<number> {
         let remainingToMatch = quantity
 
         const openPositions = await client.query(
-          `SELECT id, buy_quantity, buy_price_usd, buy_notional_usd
+          `SELECT id, buy_tx_hash, buy_block_number, buy_timestamp, buy_quantity, buy_price_usd, buy_notional_usd
            FROM oracle_position_ledger
            WHERE agent_entity = $1 AND chain = $2 AND token_address = $3 AND status = 'open'
            ORDER BY buy_timestamp ASC`, // FIFO
@@ -125,7 +124,7 @@ export async function updatePositionLedger(pool: pg.Pool): Promise<number> {
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'matched', now())`,
               [swap.agent_entity, swap.chain, swap.token_address,
                // buy side (from the original open position)
-               swap.tx_hash, pos.buy_block_number ?? swap.block_number, swap.event_timestamp,
+               pos.buy_tx_hash, pos.buy_block_number, pos.buy_timestamp,
                matchQty, pos.buy_price_usd, buyNotionalMatched,
                // sell side
                swap.tx_hash, swap.block_number, swap.event_timestamp,

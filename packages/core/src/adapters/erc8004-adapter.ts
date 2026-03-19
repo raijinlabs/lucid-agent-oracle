@@ -44,18 +44,19 @@ async function getOrCreateEntity(
   db: DbClient,
   agentId: string,
 ): Promise<string> {
+  const id = `ae_${nanoid(12)}`
+  const inserted = await db.query(
+    'INSERT INTO oracle_agent_entities (id, erc8004_id, created_at, updated_at) VALUES ($1, $2, now(), now()) ON CONFLICT (erc8004_id) DO NOTHING RETURNING id',
+    [id, agentId],
+  )
+  if (inserted.rows.length > 0) return inserted.rows[0].id as string
+
+  // Row already exists — fetch it
   const existing = await db.query(
     'SELECT id FROM oracle_agent_entities WHERE erc8004_id = $1',
     [agentId],
   )
-  if (existing.rows.length > 0) return existing.rows[0].id as string
-
-  const id = `ae_${nanoid(12)}`
-  await db.query(
-    'INSERT INTO oracle_agent_entities (id, erc8004_id, created_at, updated_at) VALUES ($1, $2, now(), now())',
-    [id, agentId],
-  )
-  return id
+  return existing.rows[0].id as string
 }
 
 async function handleAgentRegistered(
@@ -241,21 +242,31 @@ async function handleNewFeedback(
      event.tx_hash ?? '', event.block_number ?? 0, event.timestamp ?? new Date().toISOString()],
   )
 
-  // Update agent's reputation summary
+  // Update agent's reputation summary (JS-built JSON for PgBouncer compatibility)
+  const feedbackStats = await db.query(
+    `SELECT count(*) as feedback_count,
+            round(avg(value)::numeric, 2) as avg_value
+     FROM oracle_agent_feedback WHERE agent_entity = $1`,
+    [entityId],
+  )
+  const latestTags = await db.query(
+    `SELECT tag1, tag2 FROM oracle_agent_feedback
+     WHERE agent_entity = $1 ORDER BY event_timestamp DESC LIMIT 1`,
+    [entityId],
+  )
+  const reputationJson = JSON.stringify({
+    feedback_count: Number(feedbackStats.rows[0]?.feedback_count ?? 0),
+    avg_value: Number(feedbackStats.rows[0]?.avg_value ?? 0),
+    latest_tag1: latestTags.rows[0]?.tag1 ?? '',
+    latest_tag2: latestTags.rows[0]?.tag2 ?? '',
+  })
   await db.query(
     `UPDATE oracle_agent_entities
-     SET reputation_json = (
-       SELECT jsonb_build_object(
-         'feedback_count', count(*),
-         'avg_value', round(avg(value)::numeric, 2),
-         'latest_tag1', (SELECT tag1 FROM oracle_agent_feedback WHERE agent_entity = $1 ORDER BY event_timestamp DESC LIMIT 1),
-         'latest_tag2', (SELECT tag2 FROM oracle_agent_feedback WHERE agent_entity = $1 ORDER BY event_timestamp DESC LIMIT 1)
-       ) FROM oracle_agent_feedback WHERE agent_entity = $1
-     ),
-     reputation_updated_at = now(),
-     updated_at = now()
-     WHERE id = $1`,
-    [entityId],
+     SET reputation_json = $1::jsonb,
+         reputation_updated_at = now(),
+         updated_at = now()
+     WHERE id = $2`,
+    [reputationJson, entityId],
   )
 }
 

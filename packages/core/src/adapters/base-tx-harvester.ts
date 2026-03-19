@@ -16,6 +16,7 @@ import { TokenRegistry } from './token-registry.js'
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 const CHECKPOINT_KEY = 'base_tx_harvester'
 const ZERO_ADDRESS = '0x' + '0'.repeat(40)
+const STABLECOIN_SYMBOLS = ['USDC', 'USDT', 'DAI', 'USDbC'] as const
 
 export interface TxHarvesterConfig {
   intervalMs: number
@@ -108,10 +109,11 @@ export async function harvestBaseTransactions(
         const amount = BigInt(log.data).toString()
         const usdValue = tokenRegistry.getUsdValue('base', tokenAddress, amount)
 
+        // TODO: fetch real block timestamps from eth_getBlockByNumber instead of using now()
         await client.query(
           `INSERT INTO oracle_wallet_transactions
            (agent_entity, chain, wallet_address, tx_hash, block_number, log_index, direction, counterparty, token_address, token_symbol, token_decimals, amount, amount_usd, event_timestamp)
-           VALUES ($1, 'base', $2, $3, $4::bigint, $5::int, 'outbound', $6, $7, $8, $9::int, $10, $11::numeric, to_timestamp($4::bigint))
+           VALUES ($1, 'base', $2, $3, $4::bigint, $5::int, 'outbound', $6, $7, $8, $9::int, $10, $11::numeric, now())
            ON CONFLICT (chain, tx_hash, log_index) DO NOTHING`,
           [entityId, from, log.transactionHash, parseInt(log.blockNumber, 16), parseInt(log.logIndex, 16),
            to, tokenAddress, token?.symbol ?? null, token?.decimals ?? null, amount, usdValue],
@@ -134,10 +136,11 @@ export async function harvestBaseTransactions(
         const amount = BigInt(log.data).toString()
         const usdValue = tokenRegistry.getUsdValue('base', tokenAddress, amount)
 
+        // TODO: fetch real block timestamps from eth_getBlockByNumber instead of using now()
         await client.query(
           `INSERT INTO oracle_wallet_transactions
            (agent_entity, chain, wallet_address, tx_hash, block_number, log_index, direction, counterparty, token_address, token_symbol, token_decimals, amount, amount_usd, event_timestamp)
-           VALUES ($1, 'base', $2, $3, $4::bigint, $5::int, 'inbound', $6, $7, $8, $9::int, $10, $11::numeric, to_timestamp($4::bigint))
+           VALUES ($1, 'base', $2, $3, $4::bigint, $5::int, 'inbound', $6, $7, $8, $9::int, $10, $11::numeric, now())
            ON CONFLICT (chain, tx_hash, log_index) DO NOTHING`,
           [entityId, to, log.transactionHash, parseInt(log.blockNumber, 16), parseInt(log.logIndex, 16),
            from, tokenAddress, token?.symbol ?? null, token?.decimals ?? null, amount, usdValue],
@@ -278,7 +281,7 @@ async function deriveSwapPriceObservation(client: pg.PoolClient, txHash: string,
   // Derive price observation from stablecoin leg
   // If one side is a stablecoin, the other side's price can be inferred
   const stableLeg = [inbound, outbound].find((l) =>
-    ['USDC', 'USDT', 'DAI', 'USDbC'].includes(l.token_symbol ?? ''),
+    (STABLECOIN_SYMBOLS as readonly string[]).includes(l.token_symbol ?? ''),
   )
   const otherLeg = [inbound, outbound].find((l) => l !== stableLeg)
 

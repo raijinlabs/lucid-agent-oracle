@@ -76,7 +76,7 @@ export async function reclassifyWithMoralis(
        FROM oracle_wallet_transactions wt
        WHERE wt.chain = 'base'
          AND (wt.classification_confidence = 'low' OR wt.classification_confidence IS NULL)
-         AND wt.tx_type IS NULL OR wt.tx_type = 'unknown'
+         AND (wt.tx_type IS NULL OR wt.tx_type = 'unknown')
        LIMIT $1`,
       [config.batchSize],
     )

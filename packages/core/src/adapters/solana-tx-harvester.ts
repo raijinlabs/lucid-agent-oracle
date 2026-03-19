@@ -101,7 +101,7 @@ export async function harvestSolanaTransactions(
           const timestamp = new Date(tx.timestamp * 1000).toISOString()
           // Helius pre-classifies — higher confidence than EVM heuristics
           const txType = tx.type === 'SWAP' ? 'swap' : 'transfer'
-          const classConfidence = tx.type === 'SWAP' ? 'high' : 'high' // Helius classification is reliable
+          const classConfidence = 'high' // Helius classification is reliable
           const swapGroupId = tx.type === 'SWAP' ? tx.signature : null
 
           // Process token transfers
