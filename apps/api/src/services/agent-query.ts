@@ -43,7 +43,7 @@ export interface SearchParams {
   protocol_id?: string
   erc8004_id?: string
   q?: string
-  sort?: 'newest' | 'wallets' | 'protocols' | 'evidence'
+  sort?: 'newest' | 'wallets' | 'protocols' | 'evidence' | 'reputation_score'
   limit: number
   offset: number
   cursorValue?: string
@@ -223,6 +223,7 @@ export class AgentQueryService {
       case 'wallets': return 'wallet_count DESC'
       case 'protocols': return 'protocol_count DESC'
       case 'evidence': return 'feedback_count DESC'
+      case 'reputation_score': return 'reputation_score DESC NULLS LAST'
       default: return 'ae.created_at DESC'
     }
   }
@@ -308,7 +309,9 @@ export class AgentQueryService {
         ae.agent_uri, ae.metadata_json, ae.reputation_json,
         (SELECT count(*) FROM oracle_wallet_mappings wm2 WHERE wm2.agent_entity = ae.id AND wm2.removed_at IS NULL) as wallet_count,
         (SELECT count(*) FROM oracle_identity_links il2 WHERE il2.agent_entity = ae.id) as protocol_count,
-        (SELECT count(*) FROM oracle_agent_feedback fb WHERE fb.agent_entity = ae.id) as feedback_count
+        (SELECT count(*) FROM oracle_agent_feedback fb WHERE fb.agent_entity = ae.id) as feedback_count,
+        CASE WHEN ae.reputation_json IS NOT NULL AND (ae.reputation_json->>'avg_value')::numeric <= 100
+             THEN (ae.reputation_json->>'avg_value')::numeric ELSE NULL END as reputation_score
       FROM oracle_agent_entities ae ${joinClause} ${whereClause}
       ORDER BY ${this.getSortClause(params.sort)}, ae.id DESC
       LIMIT ${limitParam} ${offsetClause}`
