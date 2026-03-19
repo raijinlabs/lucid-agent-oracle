@@ -213,15 +213,12 @@ export class AgentQueryService {
   }
 
   private getSortClause(sort?: string): string {
+    // Use column aliases from SELECT list (required by DISTINCT)
     switch (sort) {
-      case 'wallets':
-        return '(SELECT count(*) FROM oracle_wallet_mappings wm3 WHERE wm3.agent_entity = ae.id AND wm3.removed_at IS NULL) DESC'
-      case 'protocols':
-        return '(SELECT count(*) FROM oracle_identity_links il3 WHERE il3.agent_entity = ae.id) DESC'
-      case 'evidence':
-        return '(SELECT count(*) FROM oracle_agent_feedback fb3 WHERE fb3.agent_entity = ae.id) DESC'
-      default:
-        return 'ae.created_at DESC'
+      case 'wallets': return 'wallet_count DESC'
+      case 'protocols': return 'protocol_count DESC'
+      case 'evidence': return 'evidence_count DESC'
+      default: return 'ae.created_at DESC'
     }
   }
 
