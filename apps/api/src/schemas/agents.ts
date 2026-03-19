@@ -105,6 +105,9 @@ export const AgentSearchItem = Type.Object({
   display_name: Type.Union([Type.String(), Type.Null()]),
   erc8004_id: Type.Union([Type.String(), Type.Null()]),
   created_at: Type.String(),
+  wallet_count: Type.Number(),
+  protocol_count: Type.Number(),
+  evidence_count: Type.Number(),
 })
 
 export type AgentSearchItem = Static<typeof AgentSearchItem>
