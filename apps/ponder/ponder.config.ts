@@ -61,7 +61,7 @@ const ERC20_TRANSFER_ABI = [
 export default createConfig({
   database: {
     connectionString: process.env.DATABASE_URL!,
-    poolConfig: { max: 5 }, // Supabase session pooler has limited connections
+    poolConfig: { max: 3 }, // Supabase session pooler limits: keep very low
   },
   networks: {
     base: {
