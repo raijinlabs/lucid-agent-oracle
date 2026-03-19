@@ -306,24 +306,29 @@ if (databaseUrl) {
   startURIResolver(uriResolverPool)
   app.log.info('URI resolver started (resolves agent registration files)')
 
-  // Base Transaction Harvester — indexes USDC transfers for resolved agent wallets
-  const baseRpcUrl = process.env.BASE_RPC_URL
-  if (baseRpcUrl) {
-    const txPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-    startTxHarvester(txPool, { intervalMs: 30_000, blockBatchSize: 2000, rpcUrl: baseRpcUrl })
-    app.log.info('Base TX harvester started (tracks agent wallet USDC transfers)')
-  } else {
-    app.log.warn('BASE_RPC_URL not set — Base transaction harvester disabled')
-  }
+  // === OPTIONAL MODULE: Trading Activity ===
+  // Enable with ENABLE_TRADING=true. Tracks ERC-20 transfers, swap detection,
+  // position ledger. Requires BASE_RPC_URL and/or HELIUS_API_KEY.
+  if (process.env.ENABLE_TRADING === 'true') {
+    const baseRpcUrl = process.env.BASE_RPC_URL
+    if (baseRpcUrl) {
+      const txPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+      startTxHarvester(txPool, { intervalMs: 30_000, blockBatchSize: 2000, rpcUrl: baseRpcUrl })
+      app.log.info('[trading] Base TX harvester started')
+    }
 
-  // Solana Transaction Harvester — indexes agent wallet activity via Helius
-  const heliusApiKey = process.env.HELIUS_API_KEY
-  if (heliusApiKey) {
-    const solPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-    startSolanaTxHarvester(solPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
-    app.log.info('Solana TX harvester started (tracks agent wallet activity via Helius)')
+    const heliusApiKey = process.env.HELIUS_API_KEY
+    if (heliusApiKey) {
+      const solPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+      startSolanaTxHarvester(solPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
+      app.log.info('[trading] Solana TX harvester started')
+    }
+
+    if (!baseRpcUrl && !heliusApiKey) {
+      app.log.warn('[trading] ENABLE_TRADING=true but no RPC URLs set — nothing to harvest')
+    }
   } else {
-    app.log.warn('HELIUS_API_KEY not set — Solana transaction harvester disabled')
+    app.log.info('Trading module disabled (set ENABLE_TRADING=true to enable)')
   }
 
   // Plan 3A v2: Fail-fast on missing CURSOR_SECRET
