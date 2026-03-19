@@ -9,8 +9,10 @@ let sink: AdapterSink | null = null
 export function getSink(): AdapterSink {
   if (sink) return sink
 
-  const databaseUrl = process.env.DATABASE_URL
-  if (!databaseUrl) throw new Error('DATABASE_URL required for Ponder adapter sink')
+  // SUPABASE_URL writes to the shared Supabase staging table (oracle_raw_adapter_events).
+  // DATABASE_URL points to Ponder's dedicated Railway Postgres (internal sync only).
+  const databaseUrl = process.env.SUPABASE_URL ?? process.env.DATABASE_URL
+  if (!databaseUrl) throw new Error('SUPABASE_URL or DATABASE_URL required for Ponder adapter sink')
 
   sink = createAdapterSink({
     databaseUrl,
