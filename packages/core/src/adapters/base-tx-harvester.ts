@@ -111,7 +111,7 @@ export async function harvestBaseTransactions(
         await client.query(
           `INSERT INTO oracle_wallet_transactions
            (agent_entity, chain, wallet_address, tx_hash, block_number, log_index, direction, counterparty, token_address, token_symbol, token_decimals, amount, amount_usd, event_timestamp)
-           VALUES ($1, 'base', $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, $11, to_timestamp($4))
+           VALUES ($1, 'base', $2, $3, $4::bigint, $5::int, 'outbound', $6, $7, $8, $9::int, $10, $11::numeric, to_timestamp($4::bigint))
            ON CONFLICT (chain, tx_hash, log_index) DO NOTHING`,
           [entityId, from, log.transactionHash, parseInt(log.blockNumber, 16), parseInt(log.logIndex, 16),
            to, tokenAddress, token?.symbol ?? null, token?.decimals ?? null, amount, usdValue],
@@ -137,7 +137,7 @@ export async function harvestBaseTransactions(
         await client.query(
           `INSERT INTO oracle_wallet_transactions
            (agent_entity, chain, wallet_address, tx_hash, block_number, log_index, direction, counterparty, token_address, token_symbol, token_decimals, amount, amount_usd, event_timestamp)
-           VALUES ($1, 'base', $2, $3, $4, $5, 'inbound', $6, $7, $8, $9, $10, $11, to_timestamp($4))
+           VALUES ($1, 'base', $2, $3, $4::bigint, $5::int, 'inbound', $6, $7, $8, $9::int, $10, $11::numeric, to_timestamp($4::bigint))
            ON CONFLICT (chain, tx_hash, log_index) DO NOTHING`,
           [entityId, to, log.transactionHash, parseInt(log.blockNumber, 16), parseInt(log.logIndex, 16),
            from, tokenAddress, token?.symbol ?? null, token?.decimals ?? null, amount, usdValue],
