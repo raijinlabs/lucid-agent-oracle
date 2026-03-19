@@ -66,8 +66,7 @@ export async function harvestSolanaTransactions(
     )
     if (walletsResult.rows.length === 0) {
       await client.query("SELECT pg_advisory_unlock(hashtext('solana_tx_harvester'))")
-      client.release()
-      return 0
+      return 0 // finally block handles client.release()
     }
 
     // Load per-wallet cursors
@@ -180,8 +179,9 @@ export async function harvestSolanaTransactions(
 
     // Save cursors
     await client.query(
-      `INSERT INTO oracle_worker_checkpoints (source_table, last_seen_id, updated_at)
-       VALUES ($1, $2, now()) ON CONFLICT (source_table) DO UPDATE SET last_seen_id = $2, updated_at = now()`,
+      `INSERT INTO oracle_worker_checkpoints (source_table, watermark_column, last_seen_ts, last_seen_id, updated_at)
+       VALUES ($1, 'created_at', now(), $2, now())
+       ON CONFLICT (source_table) DO UPDATE SET last_seen_id = $2, last_seen_ts = now(), updated_at = now()`,
       [CHECKPOINT_KEY, JSON.stringify(cursors)],
     )
 

@@ -48,8 +48,7 @@ export async function harvestBaseTransactions(
   try {
     const lockResult = await client.query("SELECT pg_try_advisory_lock(hashtext('base_tx_harvester'))")
     if (!lockResult.rows[0].pg_try_advisory_lock) {
-      client.release()
-      return 0
+      return 0 // finally block handles client.release()
     }
 
     // Load active Base wallets
@@ -58,8 +57,7 @@ export async function harvestBaseTransactions(
     )
     if (walletsResult.rows.length === 0) {
       await client.query("SELECT pg_advisory_unlock(hashtext('base_tx_harvester'))")
-      client.release()
-      return 0
+      return 0 // finally block handles client.release()
     }
 
     const walletMap = new Map<string, string>()
@@ -78,8 +76,7 @@ export async function harvestBaseTransactions(
     const toBlock = Math.min(fromBlock + effectiveBatch, currentBlock)
     if (fromBlock >= toBlock) {
       await client.query("SELECT pg_advisory_unlock(hashtext('base_tx_harvester'))")
-      client.release()
-      return 0
+      return 0 // finally block handles client.release()
     }
 
     const fromHex = '0x' + fromBlock.toString(16)
@@ -159,8 +156,9 @@ export async function harvestBaseTransactions(
 
     // Update checkpoint
     await client.query(
-      `INSERT INTO oracle_worker_checkpoints (source_table, last_seen_id, updated_at)
-       VALUES ($1, $2, now()) ON CONFLICT (source_table) DO UPDATE SET last_seen_id = $2, updated_at = now()`,
+      `INSERT INTO oracle_worker_checkpoints (source_table, watermark_column, last_seen_ts, last_seen_id, updated_at)
+       VALUES ($1, 'block_number', now(), $2, now())
+       ON CONFLICT (source_table) DO UPDATE SET last_seen_id = $2, last_seen_ts = now(), updated_at = now()`,
       [CHECKPOINT_KEY, String(toBlock)],
     )
 
