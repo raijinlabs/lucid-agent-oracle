@@ -19,6 +19,8 @@ import {
   startTxHarvester,
   startSolanaTxHarvester,
   startMoralisClassifier,
+  startBalanceEnricher,
+  startEconomyMetrics,
   dispatchIdentityEvent,
   getIdentityTopics,
   adapterRegistry,
@@ -31,6 +33,7 @@ import { registerIdentityRoutes, cleanupExpiredChallenges } from './routes/ident
 import { registerAdminRoutes } from './routes/identity-admin.js'
 import { registerAgentRoutes } from './routes/agents.js'
 import { registerProtocolRoutes } from './routes/protocols.js'
+import { registerEconomyRoutes } from './routes/economy.js'
 import { registerFeedRoutes } from './routes/feeds.js'
 import { registerReportRoutes } from './routes/reports.js'
 import { LucidResolver } from './services/lucid-resolver.js'
@@ -330,7 +333,17 @@ if (databaseUrl) {
     const moralisPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
     startMoralisClassifier(moralisPool, { apiKey: moralisApiKey, intervalMs: 60_000, batchSize: 20 })
     app.log.info('[ingestion:moralis] Swap classifier started (high-accuracy)')
+
+    // Balance enricher — polls Moralis for token balances (reuses same API key)
+    const balancePool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+    startBalanceEnricher(balancePool, { apiKey: moralisApiKey, intervalMs: 5 * 60_000, walletsPerCycle: 20 })
+    app.log.info('[ingestion:moralis] Balance enricher started (5min cycle)')
   }
+
+  // Economy metrics — hourly snapshots of economy health
+  const metricsPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+  startEconomyMetrics(metricsPool, { intervalMs: 60 * 60_000 })
+  app.log.info('[metrics] Economy snapshot computer started (hourly)')
 
   // Plan 3A v2: Fail-fast on missing CURSOR_SECRET
   assertCursorSecret()
@@ -346,7 +359,8 @@ if (databaseUrl) {
   registerProtocolRoutes(app, client)
   registerFeedRoutes(app, clickhouse)
   registerReportRoutes(app, clickhouse)
-  app.log.info('Agent, protocol, feed, and report routes mounted')
+  registerEconomyRoutes(app, client)
+  app.log.info('Agent, protocol, feed, report, and economy routes mounted')
 
   // Plan 3E: SSE streaming + webhook alert routes
   registerStreamRoutes(app, eventBus)

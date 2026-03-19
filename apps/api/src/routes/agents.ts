@@ -256,7 +256,7 @@ export function registerAgentRoutes(
   }, async (request, reply) => {
     const { id } = request.params as { id: string }
 
-    const agent = await service.getProfile(id)
+    const agent = await service.getEnrichedProfile(id)
     if (!agent) {
       return sendProblem(reply, 404, {
         type: 'agent-not-found',
@@ -282,6 +282,9 @@ export function registerAgentRoutes(
           protocol_count: agent.identity_links.length,
           feedback_count: agent.feedback_count,
         },
+        balances: agent.balances,
+        transactions_summary: agent.transactions_summary,
+        feedback: agent.feedback,
         created_at: agent.created_at,
         updated_at: agent.updated_at,
       },

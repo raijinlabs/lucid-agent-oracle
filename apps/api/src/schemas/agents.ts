@@ -39,6 +39,37 @@ export type IdentityLink = Static<typeof IdentityLink>
 // 3. AgentProfile ($id: 'AgentProfile')
 // ---------------------------------------------------------------------------
 
+const TokenBalance = Type.Object({
+  chain: Type.String(),
+  token_address: Type.String(),
+  token_symbol: Type.Union([Type.String(), Type.Null()]),
+  balance_raw: Type.String(),
+  balance_usd: Type.Number(),
+})
+
+const BalanceSummary = Type.Object({
+  total_usd: Type.Number(),
+  tokens: Type.Array(TokenBalance),
+})
+
+const TransactionsSummary = Type.Object({
+  count_24h: Type.Integer(),
+  count_7d: Type.Integer(),
+  volume_usd_24h: Type.Number(),
+  volume_usd_7d: Type.Number(),
+})
+
+const FeedbackEntry = Type.Object({
+  id: Type.Integer(),
+  client_address: Type.String(),
+  value: Type.Integer(),
+  tag1: Type.Union([Type.String(), Type.Null()]),
+  tag2: Type.Union([Type.String(), Type.Null()]),
+  endpoint: Type.Union([Type.String(), Type.Null()]),
+  event_timestamp: Type.Union([Type.String(), Type.Null()]),
+  created_at: Type.String(),
+})
+
 export const AgentProfile = Type.Object(
   {
     id: Type.String(),
@@ -55,6 +86,9 @@ export const AgentProfile = Type.Object(
       protocol_count: Type.Integer(),
       feedback_count: Type.Integer(),
     }),
+    balances: Type.Optional(BalanceSummary),
+    transactions_summary: Type.Optional(TransactionsSummary),
+    feedback: Type.Optional(Type.Array(FeedbackEntry)),
     created_at: Type.String(),
     updated_at: Type.String(),
   },
@@ -92,6 +126,8 @@ export const AgentSearchQuery = Type.Intersect(
         Type.Literal('evidence'),
         Type.Literal('reputation_score'),
         Type.Literal('smart'),
+        Type.Literal('tx_count'),
+        Type.Literal('tvl'),
       ])),
     }),
   ],
@@ -118,6 +154,8 @@ export const AgentSearchItem = Type.Object({
   active: Type.Union([Type.Boolean(), Type.Null()]),
   services_count: Type.Number(),
   reputation_score: Type.Union([Type.Number(), Type.Null()]),
+  tx_count: Type.Number(),
+  tvl: Type.Number(),
 })
 
 export type AgentSearchItem = Static<typeof AgentSearchItem>
@@ -144,6 +182,8 @@ export const LeaderboardQuery = Type.Intersect(
           Type.Literal('protocol_count'),
           Type.Literal('evidence_count'),
           Type.Literal('newest'),
+          Type.Literal('tx_count'),
+          Type.Literal('tvl'),
         ], { default: 'wallet_count' }),
       ),
     }),

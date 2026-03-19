@@ -26,7 +26,42 @@ export interface AgentProfile {
   updated_at: string
   wallets: Array<{ chain: string; address: string; link_type: string; confidence: number }>
   identity_links: Array<{ protocol: string; protocol_id: string; link_type: string; confidence: number }>
-  evidence_count: number
+  feedback_count: number
+}
+
+export interface BalanceSummary {
+  total_usd: number
+  tokens: Array<{
+    chain: string
+    token_address: string
+    token_symbol: string | null
+    balance_raw: string
+    balance_usd: number
+  }>
+}
+
+export interface TransactionsSummary {
+  count_24h: number
+  count_7d: number
+  volume_usd_24h: number
+  volume_usd_7d: number
+}
+
+export interface FeedbackEntry {
+  id: number
+  client_address: string
+  value: number
+  tag1: string | null
+  tag2: string | null
+  endpoint: string | null
+  event_timestamp: string | null
+  created_at: string
+}
+
+export interface EnrichedAgentProfile extends AgentProfile {
+  balances: BalanceSummary
+  transactions_summary: TransactionsSummary
+  feedback: FeedbackEntry[]
 }
 
 export interface AgentSearchResult {
@@ -43,7 +78,7 @@ export interface SearchParams {
   protocol_id?: string
   erc8004_id?: string
   q?: string
-  sort?: 'newest' | 'wallets' | 'protocols' | 'evidence' | 'reputation_score' | 'smart'
+  sort?: 'newest' | 'wallets' | 'protocols' | 'evidence' | 'reputation_score' | 'smart' | 'tx_count' | 'tvl'
   limit: number
   offset: number
   cursorValue?: string
@@ -61,7 +96,7 @@ export interface LeaderboardEntry {
 }
 
 export interface LeaderboardParams {
-  sort: 'wallet_count' | 'protocol_count' | 'evidence_count' | 'newest'
+  sort: 'wallet_count' | 'protocol_count' | 'evidence_count' | 'newest' | 'tx_count' | 'tvl'
   limit: number
   offset: number
   cursorValue?: number | string
@@ -217,6 +252,84 @@ export class AgentQueryService {
     }
   }
 
+  // ---- getEnrichedProfile ------------------------------------------------
+
+  async getEnrichedProfile(id: string): Promise<EnrichedAgentProfile | null> {
+    const profile = await this.getProfile(id)
+    if (!profile) return null
+
+    // Fetch enrichment data in parallel
+    const [balancesResult, txSummaryResult, feedbackResult] = await Promise.all([
+      // Token balances for this agent
+      this.db.query(
+        `SELECT chain, token_address, token_symbol, balance_raw, balance_usd
+         FROM oracle_wallet_balances
+         WHERE agent_entity = $1
+         ORDER BY balance_usd DESC`,
+        [id],
+      ),
+      // Transaction summary
+      this.db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE event_timestamp > now() - interval '24 hours')::int AS count_24h,
+           COUNT(*) FILTER (WHERE event_timestamp > now() - interval '7 days')::int AS count_7d,
+           COALESCE(SUM(amount_usd) FILTER (WHERE event_timestamp > now() - interval '24 hours'), 0)::numeric AS volume_usd_24h,
+           COALESCE(SUM(amount_usd) FILTER (WHERE event_timestamp > now() - interval '7 days'), 0)::numeric AS volume_usd_7d
+         FROM oracle_wallet_transactions
+         WHERE agent_entity = $1`,
+        [id],
+      ),
+      // Recent feedback (last 10)
+      this.db.query(
+        `SELECT id, client_address, value, tag1, tag2, endpoint, event_timestamp, created_at
+         FROM oracle_agent_feedback
+         WHERE agent_entity = $1
+         ORDER BY created_at DESC
+         LIMIT 10`,
+        [id],
+      ),
+    ])
+
+    const tokens = balancesResult.rows.map((r) => ({
+      chain: r.chain as string,
+      token_address: r.token_address as string,
+      token_symbol: (r.token_symbol as string) ?? null,
+      balance_raw: (r.balance_raw as string) ?? '0',
+      balance_usd: Number(r.balance_usd ?? 0),
+    }))
+
+    const totalUsd = tokens.reduce((sum, t) => sum + t.balance_usd, 0)
+
+    const txRow = txSummaryResult.rows[0] ?? {}
+    const transactionsSummary: TransactionsSummary = {
+      count_24h: Number(txRow.count_24h ?? 0),
+      count_7d: Number(txRow.count_7d ?? 0),
+      volume_usd_24h: Number(txRow.volume_usd_24h ?? 0),
+      volume_usd_7d: Number(txRow.volume_usd_7d ?? 0),
+    }
+
+    const feedback: FeedbackEntry[] = feedbackResult.rows.map((r) => ({
+      id: Number(r.id),
+      client_address: r.client_address as string,
+      value: Number(r.value),
+      tag1: (r.tag1 as string) ?? null,
+      tag2: (r.tag2 as string) ?? null,
+      endpoint: (r.endpoint as string) ?? null,
+      event_timestamp: r.event_timestamp ? String(r.event_timestamp) : null,
+      created_at: String(r.created_at),
+    }))
+
+    return {
+      ...profile,
+      balances: {
+        total_usd: totalUsd,
+        tokens,
+      },
+      transactions_summary: transactionsSummary,
+      feedback,
+    }
+  }
+
   private getSortClause(sort?: string): string {
     // Use column aliases from SELECT list (required by DISTINCT)
     switch (sort) {
@@ -227,6 +340,8 @@ export class AgentQueryService {
       // Smart ranking: composite score weighting reputation, activity, and completeness
       // Industry standard: weighted multi-factor ranking (similar to GitHub stars + forks + issues)
       case 'smart': return 'smart_score DESC NULLS LAST'
+      case 'tx_count': return 'tx_count DESC NULLS LAST'
+      case 'tvl': return 'tvl DESC NULLS LAST'
       default: return 'ae.created_at DESC'
     }
   }
@@ -322,7 +437,9 @@ export class AgentQueryService {
           + LEAST((SELECT count(*) FROM oracle_wallet_mappings wm4 WHERE wm4.agent_entity = ae.id AND wm4.removed_at IS NULL), 5) * 20 * 0.2
           + CASE WHEN ae.display_name IS NOT NULL THEN 50 ELSE 0 END * 0.1
           + CASE WHEN ae.metadata_json->>'active' = 'true' THEN 50 ELSE 0 END * 0.1
-        ) as smart_score
+        ) as smart_score,
+        (SELECT count(*) FROM oracle_wallet_transactions wt WHERE wt.agent_entity = ae.id) as tx_count,
+        (SELECT COALESCE(SUM(wb.balance_usd), 0) FROM oracle_wallet_balances wb WHERE wb.agent_entity = ae.id) as tvl
       FROM oracle_agent_entities ae ${joinClause} ${whereClause}
       ORDER BY ${this.getSortClause(params.sort)}, ae.id DESC
       LIMIT ${limitParam} ${offsetClause}`
@@ -350,6 +467,8 @@ export class AgentQueryService {
         active: meta?.active ?? null,
         services_count: services.length,
         reputation_score: rep?.avg_value ? Number(rep.avg_value) : null,
+        tx_count: Number(r.tx_count ?? 0),
+        tvl: Number(r.tvl ?? 0),
       }
     })
 
@@ -375,6 +494,8 @@ export class AgentQueryService {
       protocol_count: 'protocol_count',
       evidence_count: 'evidence_count',
       newest: 'created_at',
+      tx_count: 'tx_count',
+      tvl: 'tvl',
     }
     const sortColumn = sortColumnMap[params.sort] ?? 'wallet_count'
 
@@ -402,7 +523,9 @@ export class AgentQueryService {
         SELECT ae.id, ae.display_name, ae.erc8004_id, ae.created_at,
           COUNT(DISTINCT wm.id)::int AS wallet_count,
           COUNT(DISTINCT il.id)::int AS protocol_count,
-          COUNT(DISTINCT ie.id)::int AS evidence_count
+          COUNT(DISTINCT ie.id)::int AS evidence_count,
+          (SELECT count(*) FROM oracle_wallet_transactions wt WHERE wt.agent_entity = ae.id)::int AS tx_count,
+          (SELECT COALESCE(SUM(wb.balance_usd), 0) FROM oracle_wallet_balances wb WHERE wb.agent_entity = ae.id)::numeric AS tvl
         FROM oracle_agent_entities ae
         LEFT JOIN oracle_wallet_mappings wm ON wm.agent_entity = ae.id AND wm.removed_at IS NULL
         LEFT JOIN oracle_identity_links il ON il.agent_entity = ae.id

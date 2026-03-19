@@ -38,7 +38,7 @@ describe('AgentQueryService', () => {
       expect(result!.id).toBe('ae_1')
       expect(result!.wallets).toHaveLength(1)
       expect(result!.identity_links).toHaveLength(1)
-      expect(result!.evidence_count).toBe(3)
+      expect(result!.feedback_count).toBe(3)
     })
   })
 

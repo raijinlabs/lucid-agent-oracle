@@ -44,6 +44,8 @@ export { startSolanaTxHarvester, harvestSolanaTransactions } from './adapters/so
 export { TokenRegistry } from './adapters/token-registry.js'
 export { updatePositionLedger, getAgentRealizedDeltas } from './adapters/position-ledger.js'
 export { startMoralisClassifier, classifyWalletTransactions } from './adapters/moralis-classifier.js'
+export { startBalanceEnricher, enrichWalletBalances, type BalanceEnricherConfig } from './adapters/balance-enricher.js'
+export { startEconomyMetrics, computeEconomySnapshot, type EconomySnapshot, type EconomyMetricsConfig } from './adapters/economy-metrics.js'
 
 // Identity verification (Plan 4B)
 export type { WalletVerifier } from './identity/wallet-verifier.js'
