@@ -257,10 +257,11 @@ export class AgentQueryService {
       values.push(params.erc8004_id)
     }
 
-    if (params.q) {
+    if (params.q && params.q !== '*') {
       conditions.push(`ae.display_name ILIKE ${nextParam()}`)
       values.push(`%${params.q}%`)
     }
+    // q=* is a wildcard — list all agents (no filter added)
 
     // Keyset cursor condition
     if (params.cursorValue && params.cursorId) {
