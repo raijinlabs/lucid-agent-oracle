@@ -306,28 +306,21 @@ if (databaseUrl) {
   startURIResolver(uriResolverPool)
   app.log.info('URI resolver started (resolves agent registration files)')
 
-  // === OPTIONAL MODULES (explicit feature flags, off by default) ===
+  // === DATA INGESTION (always runs if keys are present — ingest everything) ===
+  // Access gating is at the API layer (auth/tiering), not at ingestion.
 
-  if (process.env.ORACLE_MODULE_BASE_TRADING === 'true') {
-    const baseRpcUrl = process.env.BASE_RPC_URL
-    if (!baseRpcUrl) {
-      app.log.error('[module:base-trading] Enabled but BASE_RPC_URL not set')
-    } else {
-      const txPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-      startTxHarvester(txPool, { intervalMs: 30_000, blockBatchSize: 2000, rpcUrl: baseRpcUrl })
-      app.log.info('[module:base-trading] Started')
-    }
+  const baseRpcUrl = process.env.BASE_RPC_URL
+  if (baseRpcUrl) {
+    const txPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+    startTxHarvester(txPool, { intervalMs: 30_000, blockBatchSize: 2000, rpcUrl: baseRpcUrl })
+    app.log.info('[ingestion:base] TX harvester started')
   }
 
-  if (process.env.ORACLE_MODULE_SOLANA_TRADING === 'true') {
-    const heliusApiKey = process.env.HELIUS_API_KEY
-    if (!heliusApiKey) {
-      app.log.error('[module:solana-trading] Enabled but HELIUS_API_KEY not set')
-    } else {
-      const solPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-      startSolanaTxHarvester(solPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
-      app.log.info('[module:solana-trading] Started')
-    }
+  const heliusApiKey = process.env.HELIUS_API_KEY
+  if (heliusApiKey) {
+    const solPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
+    startSolanaTxHarvester(solPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
+    app.log.info('[ingestion:solana] TX harvester started')
   }
 
   // Plan 3A v2: Fail-fast on missing CURSOR_SECRET
