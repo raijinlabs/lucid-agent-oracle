@@ -22,11 +22,13 @@ curl https://oracle-api-production-94f8.up.railway.app/docs  # Swagger UI
 
 | Service | Dockerfile | Railway Status |
 |---------|-----------|---------------|
-| `oracle-api` | `Dockerfile.oracle` | Running — serves 19 API endpoints |
+| `oracle-api` | `Dockerfile.oracle` | Running — serves 19 API endpoints + enrichers |
 | `oracle-worker` | `Dockerfile.worker` | Running — computes feeds every 30s |
 | `oracle-webhook-worker` | `Dockerfile.webhook-worker` | Running — webhook delivery |
 | `Oracle Redis` | Railway-native | Running — cache, SSE, webhooks |
 | `oracle-clickhouse` | Docker image (24.8-alpine) | Running — OLAP storage |
+
+**Enrichers** run inside the `oracle-api` process (balance, DeFi, NFT, ENS, Olas, gas, contracts, economy metrics). Each enricher uses advisory locks and configurable poll intervals. They start automatically when the corresponding API key env vars are set (e.g., `MORALIS_API_KEY`, `BASE_RPC_URL`).
 
 ### Infrastructure
 
@@ -65,7 +67,7 @@ migrations/          — ClickHouse + Supabase SQL migrations
 
 ```bash
 npm run dev          # Start API server (tsx apps/api/src/server.ts)
-npm test             # Run all tests (vitest run, 370 tests) — needs CURSOR_SECRET env
+npm test             # Run all tests (vitest run, 421 tests) — needs CURSOR_SECRET env
 npm run typecheck    # TypeScript check (tsc --noEmit)
 ```
 
@@ -107,7 +109,7 @@ npx tsc  # Compile (speakeasy compile may fail on Windows — oxlint issue)
 - **On-chain:** Solana (Ed25519), Base (Foundry/Solidity)
 - **Attestation:** Ed25519 single-signer + multi-signer (N-of-M quorum with SignerSetRegistry)
 - **Observability:** OpenTelemetry (auto-instrumented Fastify/pg/redis) + 15 custom metrics
-- **Testing:** Vitest (370 tests, 65 files)
+- **Testing:** Vitest (421 tests, 65 files)
 - **CI/CD:** GitHub Actions (typecheck + test + docker build on push/PR)
 
 ## Architecture
@@ -155,11 +157,14 @@ API key via `x-api-key` header → `gateway_tenants` table → Redis cache (5min
 
 ### Database Schema
 
-**Supabase (Lucid Cloud `kkpgnldwrcagpgwofgqx`):** 12 tables prefixed `oracle_*`
+**Supabase (Lucid Cloud `kkpgnldwrcagpgwofgqx`):** 23 tables prefixed `oracle_*`
 - `oracle_agent_entities`, `oracle_wallet_mappings`, `oracle_identity_links`
 - `oracle_identity_evidence`, `oracle_identity_conflicts`, `oracle_registration_challenges`
 - `oracle_feed_definitions`, `oracle_protocol_registry`, `oracle_source_connectors`
 - `oracle_subscriptions`, `oracle_webhook_deliveries`, `oracle_worker_checkpoints`
+- `oracle_wallet_transactions`, `oracle_token_registry`, `oracle_price_observations`, `oracle_position_ledger`, `oracle_agent_feedback`
+- `oracle_wallet_balances`, `oracle_economy_snapshots`, `oracle_defi_positions`, `oracle_nft_holdings`
+- `oracle_name_resolution`, `oracle_gas_metrics`, `oracle_contract_interactions`
 
 **ClickHouse (database: `oracle_economy`):** 4 objects
 - `raw_economic_events` — all ingested events (partitioned by month)
@@ -192,6 +197,24 @@ API key via `x-api-key` header → `gateway_tenants` table → Redis cache (5min
 | Infra | Done | Docker Compose, CI/CD, OTel, Railway deployment, Supabase migration |
 | Multi-signer | Done | N-of-M quorum attestation with SignerSetRegistry |
 | E2E tests | Done | 20 pipeline tests (compute → cache → serve → error paths → stale rejection) |
+| ERC-8004 Indexer | Done | Ponder indexer for Identity Registry + Reputation Registry on Base |
+| Wallet Resolution | Done | MetadataSet agentWallet decoding, URI resolver, on-chain proof mapping |
+| TX Harvester | Done | All ERC-20 transfers for agent wallets (Base via QuickNode, Solana via Helius) |
+| Trading Classification | Done | Heuristic swap detection + Moralis high-accuracy reclassification |
+| Position Ledger | Done | FIFO cost basis matching for realized execution deltas |
+| Balance Enricher | Done | Token balances per wallet via Moralis (5min cycle) |
+| DeFi Enricher | Done | DeFi positions via Moralis (30min cycle) |
+| NFT Enricher | Done | NFT holdings via Moralis (30min cycle) |
+| ENS Resolver | Done | ENS/Basename resolution via Moralis + Base RPC |
+| Olas Enricher | Done | Marketplace metadata scraping (images, descriptions) |
+| Gas Metrics | Done | Activity intensity from transaction counts |
+| Contract Analyzer | Done | Top contract interactions per agent |
+| Economy Metrics | Done | Hourly economy snapshots (portfolio value, volume, agents) |
+| Agent Graph | Done | Agent-to-agent transaction discovery endpoint |
+| Enricher Infra | Done | Shared utilities (withAdvisoryLock, processBatch, fetchMoralis, chain config) |
+| Dashboard Phase A | Done | Economy overview, leaderboard tabs, enriched agent profile, activity pulse |
+| Dashboard Phase B | Done | Network page, comparison mode, ENS/gas/contract UI, share button |
+| Dashboard Phase C | Done | Force graph, particle hero, animated counters, reputation gauge, OG cards |
 
 ## Key Files
 
@@ -213,6 +236,13 @@ API key via `x-api-key` header → `gateway_tenants` table → Redis cache (5min
 | `packages/core/src/services/attestation-service.ts` | Ed25519 signing — single + multi-signer + SignerSetRegistry |
 | `packages/core/src/metrics.ts` | 15 custom OTel metrics (feeds, SSE, webhooks, worker, API) |
 | `packages/core/src/index.ts` | Core barrel exports |
+| `packages/core/src/adapters/chains.ts` | Chain configuration (Base, Ethereum, Solana) |
+| `packages/core/src/adapters/enricher-utils.ts` | Shared enricher utilities (lock, batch, loop, fetch) |
+| `packages/core/src/adapters/balance-enricher.ts` | Token balance enrichment via Moralis |
+| `packages/core/src/adapters/economy-metrics.ts` | Hourly economy snapshot computation |
+| `packages/core/src/adapters/base-tx-harvester.ts` | Base ERC-20 transfer indexing |
+| `packages/core/src/adapters/solana-tx-harvester.ts` | Solana transaction indexing via Helius |
+| `apps/api/src/routes/economy.ts` | Economy metrics API endpoints |
 | `.github/workflows/ci.yml` | CI: typecheck + test + docker build |
 | `docker-compose.yml` | Local dev stack (all infra + services + Grafana) |
 | `Dockerfile.oracle` | Railway: API service |
@@ -261,6 +291,9 @@ API key via `x-api-key` header → `gateway_tenants` table → Redis cache (5min
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTel collector endpoint |
 | `POLL_INTERVAL_MS` | `300000` | Worker poll interval |
 | `COMPUTATION_WINDOW_MS` | `3600000` | Feed computation window (1h) |
+| `MORALIS_API_KEY` | — | Moralis API for balances, NFTs, DeFi, ENS, swap classification |
+| `BASE_RPC_URL` | — | QuickNode RPC for Base TX harvesting + ENS resolution |
+| `HELIUS_API_KEY` | — | Helius API for Solana TX harvesting |
 
 ## Remotes & Repos
 
