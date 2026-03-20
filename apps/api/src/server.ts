@@ -388,7 +388,9 @@ if (databaseUrl) {
   // Subgraph ingester — bulk-ingests ERC-8004 agents across all EVM chains via The Graph
   // Replaces Ponder for bulk identity data (110K+ agents across 5 chains in ~90 seconds)
   startSubgraphIngester(sharedPool, { pollIntervalMs: 5 * 60_000 })
-  app.log.info('[ingestion:subgraph] ERC-8004 subgraph ingester started (5min poll after initial sync)')
+  app.log.info(
+    `[ingestion:subgraph] ERC-8004 subgraph ingester started (5min poll) — GRAPH_API_KEY: ${process.env.GRAPH_API_KEY ? 'set (custom key)' : 'not set (using embedded fallback keys)'}`,
+  )
 
   // Plan 3A v2: Fail-fast on missing CURSOR_SECRET
   assertCursorSecret()

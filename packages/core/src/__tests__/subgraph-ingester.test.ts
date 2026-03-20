@@ -137,7 +137,7 @@ describe('checkpoint helpers', () => {
 
   it('getCheckpoint parses stored value', async () => {
     const client = mockClient()
-    client.query.mockResolvedValueOnce({ rows: [{ value: '34863' }] })
+    client.query.mockResolvedValueOnce({ rows: [{ last_seen_id: '34863' }] })
 
     const val = await getCheckpoint(client as any, 'base')
     expect(val).toBe(34863)
@@ -305,7 +305,7 @@ describe('querySubgraph', () => {
     }) as any
 
     await expect(querySubgraph('https://sub.example.com', '{}', 5000))
-      .rejects.toThrow('Subgraph HTTP 429')
+      .rejects.toThrow('Graph HTTP 429')
 
     globalThis.fetch = originalFetch
   })

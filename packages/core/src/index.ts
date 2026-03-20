@@ -59,7 +59,7 @@ export {
 } from './adapters/subgraph-ingester.js'
 
 // Chain configuration + enricher utilities
-export { CHAINS, EVM_CHAINS, ALL_CHAIN_IDS, getMoralisChainParam, type ChainConfig } from './adapters/chains.js'
+export { CHAINS, EVM_CHAINS, ALL_CHAIN_IDS, getMoralisChainParam, getSubgraphUrl, type ChainConfig } from './adapters/chains.js'
 export { withAdvisoryLock, processBatch, startEnricherLoop, fetchMoralis } from './adapters/enricher-utils.js'
 
 // Identity verification (Plan 4B)
@@ -104,6 +104,21 @@ export {
 export { normalizeHeliusTransaction, verifyHeliusSignature, type HeliusTransaction } from './adapters/helius.js'
 
 // Clients
+export {
+  queryGraph,
+  buildSubgraphUrl,
+  resolveGraphUrl,
+  extractSubgraphId,
+  type GraphQueryResult,
+  type GraphClientConfig,
+} from './clients/graph.js'
+export {
+  agentsQuery,
+  agentsAfterQuery,
+  agentByIdQuery,
+  feedbackQuery,
+  metadataQuery,
+} from './clients/graph-queries.js'
 export {
   OracleClickHouse,
   type ClickHouseConfig,

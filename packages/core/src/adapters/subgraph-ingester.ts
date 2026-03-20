@@ -10,11 +10,15 @@
  * Uses the same staging pipeline as Ponder/DirectSink: writes to
  * oracle_raw_adapter_events with source='erc8004', then the resolver-poller
  * picks them up and creates oracle_agent_entities + wallet mappings.
+ *
+ * Graph queries and HTTP client are imported from the shared clients/graph module.
  */
 import type pg from 'pg'
 import { computeEventId } from '../types/events.js'
-import { withAdvisoryLock, startEnricherLoop } from './enricher-utils.js'
-import { CHAINS } from './chains.js'
+import { startEnricherLoop } from './enricher-utils.js'
+import { CHAINS, getSubgraphUrl } from './chains.js'
+import { queryGraph } from '../clients/graph.js'
+import { agentsQuery, agentsAfterQuery } from '../clients/graph-queries.js'
 
 // ── Types ──
 
@@ -44,60 +48,29 @@ const DEFAULT_CONFIG: SubgraphIngesterConfig = {
   timeoutMs: 15_000,
 }
 
-// ── GraphQL query ──
+// ── Subgraph HTTP client (delegates to shared Graph client) ──
 
-function buildAgentsQuery(first: number, skip: number): string {
-  return JSON.stringify({
-    query: `{
-  agents(first: ${first}, skip: ${skip}, orderBy: agentId, orderDirection: asc) {
-    agentId
-    owner
-    agentURI
-  }
-}`,
-  })
-}
-
-function buildAgentsAfterQuery(first: number, lastAgentId: number): string {
-  return JSON.stringify({
-    query: `{
-  agents(first: ${first}, orderBy: agentId, orderDirection: asc, where: { agentId_gt: "${lastAgentId}" }) {
-    agentId
-    owner
-    agentURI
-  }
-}`,
-  })
-}
-
-// ── Subgraph HTTP client ──
-
+/**
+ * Query a subgraph for agents. Thin wrapper around the shared queryGraph client
+ * that extracts the agents array from the response.
+ *
+ * Kept as a named export for backward compatibility with existing tests.
+ */
 export async function querySubgraph(
   url: string,
   body: string,
   timeoutMs: number,
 ): Promise<SubgraphAgent[]> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      signal: controller.signal,
-    })
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`Subgraph HTTP ${res.status}: ${text.slice(0, 200)}`)
-    }
-    const json = await res.json() as { data?: { agents?: SubgraphAgent[] }; errors?: { message: string }[] }
-    if (json.errors?.length) {
-      throw new Error(`Subgraph GraphQL error: ${json.errors[0].message}`)
-    }
-    return json.data?.agents ?? []
-  } finally {
-    clearTimeout(timer)
-  }
+  // The body is a JSON string containing { query: "..." }.
+  // queryGraph expects the raw query string, so we parse it out.
+  const parsed = JSON.parse(body) as { query: string; variables?: Record<string, any> }
+  const result = await queryGraph<{ agents?: SubgraphAgent[] }>(
+    url,
+    parsed.query,
+    parsed.variables,
+    timeoutMs,
+  )
+  return result.data?.agents ?? []
 }
 
 // ── Checkpoint helpers ──
@@ -153,7 +126,7 @@ export async function syncSubgraphChain(
     while (true) {
       const agents = await querySubgraph(
         subgraphUrl,
-        buildAgentsQuery(config.batchSize, skip),
+        agentsQuery(config.batchSize, skip),
         config.timeoutMs,
       )
       if (agents.length === 0) break
@@ -172,7 +145,7 @@ export async function syncSubgraphChain(
     // Incremental sync — fetch only new agents
     const agents = await querySubgraph(
       subgraphUrl,
-      buildAgentsAfterQuery(config.batchSize, lastAgentId),
+      agentsAfterQuery(config.batchSize, lastAgentId),
       config.timeoutMs,
     )
 
@@ -248,7 +221,7 @@ async function syncSubgraphChainPooled(
   if (lastAgentId === 0) {
     let skip = 0
     while (true) {
-      const agents = await querySubgraph(subgraphUrl, buildAgentsQuery(config.batchSize, skip), config.timeoutMs)
+      const agents = await querySubgraph(subgraphUrl, agentsQuery(config.batchSize, skip), config.timeoutMs)
       if (agents.length === 0) break
 
       for (const agent of agents) {
@@ -266,7 +239,7 @@ async function syncSubgraphChainPooled(
       if (agents.length < config.batchSize) break
     }
   } else {
-    const agents = await querySubgraph(subgraphUrl, buildAgentsAfterQuery(config.batchSize, lastAgentId), config.timeoutMs)
+    const agents = await querySubgraph(subgraphUrl, agentsAfterQuery(config.batchSize, lastAgentId), config.timeoutMs)
     for (const agent of agents) {
       const written = await writeAgentStagingEvent(pool, chainName, agent)
       if (written) agentsProcessed++
@@ -289,7 +262,7 @@ export async function runSubgraphSync(
   config: SubgraphIngesterConfig = DEFAULT_CONFIG,
 ): Promise<number> {
   const chainsWithSubgraphs = Object.entries(CHAINS).filter(
-    ([, c]) => c.type === 'evm' && c.subgraphUrl,
+    ([, c]) => c.type === 'evm' && c.subgraphId,
   )
   console.log(`[subgraph-ingester] Found ${chainsWithSubgraphs.length} chains with subgraphs: ${chainsWithSubgraphs.map(([id]) => id).join(', ')}`)
   if (chainsWithSubgraphs.length === 0) return 0
@@ -301,6 +274,12 @@ export async function runSubgraphSync(
 
   for (const [chainId, chainConfig] of chainsWithSubgraphs) {
     try {
+      const subgraphUrl = getSubgraphUrl(chainConfig)
+      if (!subgraphUrl) {
+        console.warn(`[subgraph-ingester] ${chainConfig.name}: no subgraph URL available (set GRAPH_API_KEY env var)`)
+        continue
+      }
+
       console.log(`[subgraph-ingester] Syncing ${chainConfig.name}...`)
       const client = await pool.connect()
       let lastAgentId: number
@@ -316,7 +295,7 @@ export async function runSubgraphSync(
         pool,
         chainId,
         chainId,
-        chainConfig.subgraphUrl!,
+        subgraphUrl,
         lastAgentId,
         config,
       )
