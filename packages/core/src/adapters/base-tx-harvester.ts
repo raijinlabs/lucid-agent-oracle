@@ -106,7 +106,7 @@ export async function harvestBaseTransactions(
         const token = tokenRegistry.lookup('base', tokenAddress)
         if (!token) tokenRegistry.queueResolution('base', tokenAddress)
 
-        const amount = BigInt(log.data).toString()
+        const amount = (log.data && log.data !== '0x' && log.data.length > 2) ? BigInt(log.data).toString() : '0'
         const usdValue = tokenRegistry.getUsdValue('base', tokenAddress, amount)
 
         // TODO: fetch real block timestamps from eth_getBlockByNumber instead of using now()
@@ -133,7 +133,7 @@ export async function harvestBaseTransactions(
         const token = tokenRegistry.lookup('base', tokenAddress)
         if (!token) tokenRegistry.queueResolution('base', tokenAddress)
 
-        const amount = BigInt(log.data).toString()
+        const amount = (log.data && log.data !== '0x' && log.data.length > 2) ? BigInt(log.data).toString() : '0'
         const usdValue = tokenRegistry.getUsdValue('base', tokenAddress, amount)
 
         // TODO: fetch real block timestamps from eth_getBlockByNumber instead of using now()
