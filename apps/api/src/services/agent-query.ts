@@ -465,7 +465,8 @@ export class AgentQueryService {
           + CASE WHEN ae.metadata_json->>'active' = 'true' THEN 50 ELSE 0 END * 0.1
         ) as smart_score,
         (SELECT count(*) FROM oracle_wallet_transactions wt WHERE wt.agent_entity = ae.id) as tx_count,
-        (SELECT COALESCE(SUM(wb.balance_usd), 0) FROM oracle_wallet_balances wb WHERE wb.agent_entity = ae.id AND (wb.balance_usd IS NULL OR wb.balance_usd < 100000)) as tvl
+        (SELECT COALESCE(SUM(wb.balance_usd), 0) FROM oracle_wallet_balances wb WHERE wb.agent_entity = ae.id AND (wb.balance_usd IS NULL OR wb.balance_usd < 100000)) as tvl,
+        (SELECT wmp.chain FROM oracle_wallet_mappings wmp WHERE wmp.agent_entity = ae.id AND wmp.removed_at IS NULL LIMIT 1) as primary_chain
       FROM oracle_agent_entities ae ${joinClause} ${whereClause}
       ORDER BY ${this.getSortClause(params.sort)}, ae.id DESC
       LIMIT ${limitParam} ${offsetClause}`
@@ -495,6 +496,7 @@ export class AgentQueryService {
         reputation_score: rep?.avg_value ? Number(rep.avg_value) : null,
         tx_count: Number(r.tx_count ?? 0),
         tvl: Number(r.tvl ?? 0),
+        primary_chain: (r.primary_chain as string) ?? null,
       }
     })
 

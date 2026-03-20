@@ -161,6 +161,7 @@ export const AgentSearchItem = Type.Object({
   reputation_score: Type.Union([Type.Number(), Type.Null()]),
   tx_count: Type.Number(),
   tvl: Type.Number(),
+  primary_chain: Type.Union([Type.String(), Type.Null()]),
 })
 
 export type AgentSearchItem = Static<typeof AgentSearchItem>
