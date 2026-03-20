@@ -200,7 +200,7 @@ export async function syncSubgraphChain(
  * Returns true if a new row was inserted, false if it already existed.
  */
 export async function writeAgentStagingEvent(
-  client: pg.PoolClient,
+  db: { query: pg.Pool['query'] },
   chainName: string,
   agent: SubgraphAgent,
 ): Promise<boolean> {
@@ -212,7 +212,7 @@ export async function writeAgentStagingEvent(
     agent_uri: agent.agentURI,
   }
 
-  const result = await client.query(
+  const result = await db.query(
     `INSERT INTO oracle_raw_adapter_events
       (event_id, source, source_adapter_ver, chain, event_type,
        event_timestamp, payload_json)
@@ -233,6 +233,51 @@ export async function writeAgentStagingEvent(
   return result.rows.length > 0
 }
 
+/** Pool-based version — uses pool.query for each INSERT to avoid statement timeout on long syncs */
+async function syncSubgraphChainPooled(
+  pool: pg.Pool,
+  chainKey: string,
+  chainName: string,
+  subgraphUrl: string,
+  lastAgentId: number,
+  config: SubgraphIngesterConfig = DEFAULT_CONFIG,
+): Promise<SubgraphSyncResult> {
+  let agentsProcessed = 0
+  let highestId = lastAgentId
+
+  if (lastAgentId === 0) {
+    let skip = 0
+    while (true) {
+      const agents = await querySubgraph(subgraphUrl, buildAgentsQuery(config.batchSize, skip), config.timeoutMs)
+      if (agents.length === 0) break
+
+      for (const agent of agents) {
+        const written = await writeAgentStagingEvent(pool, chainName, agent)
+        if (written) agentsProcessed++
+        const numId = parseInt(agent.agentId, 10)
+        if (!isNaN(numId) && numId > highestId) highestId = numId
+      }
+
+      if (agentsProcessed > 0 && agentsProcessed % 5000 === 0) {
+        console.log(`[subgraph-ingester] ${chainName}: ${agentsProcessed} agents so far (skip=${skip})`)
+      }
+
+      skip += agents.length
+      if (agents.length < config.batchSize) break
+    }
+  } else {
+    const agents = await querySubgraph(subgraphUrl, buildAgentsAfterQuery(config.batchSize, lastAgentId), config.timeoutMs)
+    for (const agent of agents) {
+      const written = await writeAgentStagingEvent(pool, chainName, agent)
+      if (written) agentsProcessed++
+      const numId = parseInt(agent.agentId, 10)
+      if (!isNaN(numId) && numId > highestId) highestId = numId
+    }
+  }
+
+  return { agentsProcessed, lastAgentId: highestId }
+}
+
 // ── Orchestrator ──
 
 /**
@@ -249,41 +294,55 @@ export async function runSubgraphSync(
   console.log(`[subgraph-ingester] Found ${chainsWithSubgraphs.length} chains with subgraphs: ${chainsWithSubgraphs.map(([id]) => id).join(', ')}`)
   if (chainsWithSubgraphs.length === 0) return 0
 
-  const result = await withAdvisoryLock(pool, 'subgraph_ingester', async (client) => {
-    let totalProcessed = 0
+  // Use pool directly (not advisory lock) — the sync can take minutes for 34K+ agents.
+  // Advisory lock on a single connection would hit statement timeout.
+  // Idempotent event_ids prevent duplicates if multiple instances run.
+  let totalProcessed = 0
 
-    for (const [chainId, chainConfig] of chainsWithSubgraphs) {
+  for (const [chainId, chainConfig] of chainsWithSubgraphs) {
+    try {
+      console.log(`[subgraph-ingester] Syncing ${chainConfig.name}...`)
+      const client = await pool.connect()
+      let lastAgentId: number
       try {
-        console.log(`[subgraph-ingester] Syncing ${chainConfig.name}...`)
-        const lastAgentId = await getCheckpoint(client, chainId)
-        console.log(`[subgraph-ingester] ${chainConfig.name} checkpoint: ${lastAgentId}`)
-        const syncResult = await syncSubgraphChain(
-          client,
-          chainId,      // e.g., 'base'
-          chainId,      // chainName same as chainId
-          chainConfig.subgraphUrl!,
-          lastAgentId,
-          config,
-        )
-        totalProcessed += syncResult.agentsProcessed
-        if (syncResult.agentsProcessed > 0) {
-          console.log(
-            `[subgraph-ingester] ${chainConfig.name}: +${syncResult.agentsProcessed} agents (last ID: ${syncResult.lastAgentId})`,
-          )
-        }
-      } catch (err) {
-        console.error(
-          `[subgraph-ingester] ${chainConfig.name} error:`,
-          (err as Error).message,
-        )
-        // Continue with other chains
+        lastAgentId = await getCheckpoint(client, chainId)
+      } finally {
+        client.release()
       }
+      console.log(`[subgraph-ingester] ${chainConfig.name} checkpoint: ${lastAgentId}`)
+
+      // Sync using pool.query for each INSERT (no long-held connection)
+      const syncResult = await syncSubgraphChainPooled(
+        pool,
+        chainId,
+        chainId,
+        chainConfig.subgraphUrl!,
+        lastAgentId,
+        config,
+      )
+      totalProcessed += syncResult.agentsProcessed
+      if (syncResult.agentsProcessed > 0) {
+        // Save checkpoint
+        const cpClient = await pool.connect()
+        try {
+          await setCheckpoint(cpClient, chainId, syncResult.lastAgentId)
+        } finally {
+          cpClient.release()
+        }
+        console.log(
+          `[subgraph-ingester] ${chainConfig.name}: +${syncResult.agentsProcessed} agents (last ID: ${syncResult.lastAgentId})`,
+        )
+      }
+    } catch (err) {
+      console.error(
+        `[subgraph-ingester] ${chainConfig.name} error:`,
+        (err as Error).message,
+      )
+      // Continue with other chains
     }
+  }
 
-    return totalProcessed
-  })
-
-  return result ?? 0
+  return totalProcessed
 }
 
 // ── Entrypoint ──
