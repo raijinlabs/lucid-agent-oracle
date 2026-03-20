@@ -72,8 +72,9 @@ export async function harvestBaseTransactions(
     const currentBlock = await getCurrentBlock(config.rpcUrl)
     if (fromBlock === 0 || fromBlock > currentBlock) fromBlock = Math.max(currentBlock - 1000, 0)
 
-    // Dynamic block batch — reduce as wallet count grows
-    const effectiveBatch = Math.max(200, Math.floor(config.blockBatchSize / Math.ceil(addresses.length / config.addressBatchSize)))
+    // Dynamic block batch — scale with wallet count but keep a reasonable minimum
+    // With topic-filtered eth_getLogs, 2000 blocks is safe even with 1000+ wallets
+    const effectiveBatch = Math.max(1000, Math.floor(config.blockBatchSize / Math.max(1, Math.ceil(addresses.length / 200))))
     const toBlock = Math.min(fromBlock + effectiveBatch, currentBlock)
     if (fromBlock >= toBlock) {
       await client.query("SELECT pg_advisory_unlock(hashtext('base_tx_harvester'))")
