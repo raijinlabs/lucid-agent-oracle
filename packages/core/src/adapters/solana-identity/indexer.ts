@@ -234,24 +234,36 @@ export async function indexSolanaIdentityEvents(
         const lastSig = cursors[cursorKey]
 
         try {
-          // Fetch new transaction signatures
-          const sigs = await fetchSignatures(
-            config.heliusApiKey,
-            programId,
-            lastSig,
-            config.batchSize,
-          )
+          // Fetch transaction signatures — paginate fully on first run (no cursor)
+          let allSigs: Awaited<ReturnType<typeof fetchSignatures>> = []
+          let pageCursor = lastSig
+          const maxPages = lastSig ? 1 : 50 // First run: up to 50 pages (5000 txs); after: 1 page
 
-          if (sigs.length === 0) continue
+          for (let page = 0; page < maxPages; page++) {
+            const sigs = await fetchSignatures(
+              config.heliusApiKey,
+              programId,
+              pageCursor,
+              100, // Max per page for backfill
+            )
+            if (sigs.length === 0) break
+            allSigs = allSigs.concat(sigs)
+            pageCursor = sigs[sigs.length - 1].signature
+            if (sigs.length < 100) break // Last page
+            await new Promise(r => setTimeout(r, 200))
+          }
 
-          // Filter out already-seen signatures (Helius returns inclusive of 'before')
+          if (allSigs.length === 0) continue
+
+          // Filter out already-seen signatures
           const newSigs = lastSig
-            ? sigs.filter(s => s.signature !== lastSig)
-            : sigs
+            ? allSigs.filter(s => s.signature !== lastSig)
+            : allSigs
 
           if (newSigs.length === 0) continue
+          if (!lastSig) console.log(`[solana-identity] Backfilling ${newSigs.length} transactions for ${provider.id}:${programId.slice(0, 8)}`)
 
-          // Process each transaction (newest first from Helius, but we process oldest first)
+          // Process oldest first
           const orderedSigs = [...newSigs].reverse()
 
           for (const sigInfo of orderedSigs) {
