@@ -110,18 +110,18 @@ function checkpointKey(chainName: string): string {
 
 export async function getCheckpoint(client: pg.PoolClient, chainName: string): Promise<number> {
   const result = await client.query(
-    `SELECT value FROM oracle_worker_checkpoints WHERE key = $1::text`,
+    `SELECT last_seen_id FROM oracle_worker_checkpoints WHERE source_table = $1::text`,
     [checkpointKey(chainName)],
   )
   if (result.rows.length === 0) return 0
-  return parseInt(String(result.rows[0].value), 10) || 0
+  return parseInt(String(result.rows[0].last_seen_id), 10) || 0
 }
 
 export async function setCheckpoint(client: pg.PoolClient, chainName: string, lastAgentId: number): Promise<void> {
   await client.query(
-    `INSERT INTO oracle_worker_checkpoints (key, value, updated_at)
-     VALUES ($1::text, $2::text, now())
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    `INSERT INTO oracle_worker_checkpoints (source_table, watermark_column, last_seen_ts, last_seen_id, updated_at)
+     VALUES ($1::text, 'agent_id', now(), $2::text, now())
+     ON CONFLICT (source_table) DO UPDATE SET last_seen_id = EXCLUDED.last_seen_id, last_seen_ts = now(), updated_at = now()`,
     [checkpointKey(chainName), String(lastAgentId)],
   )
 }
