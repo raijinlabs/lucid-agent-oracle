@@ -267,6 +267,8 @@ export function registerAgentRoutes(
       })
     }
 
+    const meta = agent.metadata_json as Record<string, any> | null
+
     return reply.send({
       data: {
         id: agent.id,
@@ -274,6 +276,11 @@ export function registerAgentRoutes(
         erc8004_id: agent.erc8004_id,
         lucid_tenant: agent.lucid_tenant,
         agent_uri: agent.agent_uri,
+        image_url: (agent as any).image_url ?? null,
+        description: (agent as any).description ?? meta?.description ?? null,
+        category: (agent as any).category ?? null,
+        ecosystem: meta?.ecosystem ?? null,
+        active: meta?.active ?? null,
         metadata_json: agent.metadata_json,
         reputation_json: agent.reputation_json,
         wallets: agent.wallets,

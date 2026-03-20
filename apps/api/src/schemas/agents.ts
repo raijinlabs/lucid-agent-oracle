@@ -79,6 +79,11 @@ export const AgentProfile = Type.Object(
     agent_uri: Type.Union([Type.String(), Type.Null()]),
     metadata_json: Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()]),
     reputation_json: Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()]),
+    image_url: Type.Union([Type.String(), Type.Null()]),
+    description: Type.Union([Type.String(), Type.Null()]),
+    category: Type.Union([Type.String(), Type.Null()]),
+    ecosystem: Type.Union([Type.String(), Type.Null()]),
+    active: Type.Union([Type.Boolean(), Type.Null()]),
     wallets: Type.Array(Wallet),
     protocols: Type.Array(IdentityLink),
     stats: Type.Object({

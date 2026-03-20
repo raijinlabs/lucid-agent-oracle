@@ -20,6 +20,11 @@ export interface AgentProfile {
   display_name: string | null
   erc8004_id: string | null
   lucid_tenant: string | null
+  image_url: string | null
+  description: string | null
+  category: string | null
+  ecosystem: string | null
+  active: boolean | null
   reputation_json: Record<string, unknown> | null
   reputation_updated_at: string | null
   created_at: string
@@ -235,6 +240,11 @@ export class AgentQueryService {
       display_name: (entity.display_name as string) ?? null,
       erc8004_id: (entity.erc8004_id as string) ?? null,
       lucid_tenant: (entity.lucid_tenant as string) ?? null,
+      image_url: (entity.image_url as string) ?? null,
+      description: (entity.description as string) ?? meta?.description as string ?? null,
+      category: (entity.category as string) ?? null,
+      ecosystem: (meta?.ecosystem as string) ?? null,
+      active: meta?.active as boolean ?? null,
       agent_uri: (entity.agent_uri as string) ?? null,
       metadata_json: meta ?? null,
       reputation_json: repJson ?? null,

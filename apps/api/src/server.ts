@@ -224,6 +224,7 @@ let pgClient: { end(): Promise<void> } | null = null
 
 if (databaseUrl) {
   const { default: pg } = await import('pg')
+  const sharedPool = new pg.Pool({ connectionString: databaseUrl, max: 20 })
   const client = new pg.Client({ connectionString: databaseUrl })
   await client.connect()
   pgClient = client
@@ -301,7 +302,7 @@ if (databaseUrl) {
 
   // Start resolver poller (processes staging table events → identity tables)
   const resolverPoller = startResolverPoller(
-    new (await import('pg')).default.Pool({ connectionString: databaseUrl }),
+    sharedPool,
     async (source, payload, db) => {
       await dispatchIdentityEvent(source, payload as Record<string, unknown>, db as any, null as any)
     },
@@ -310,8 +311,7 @@ if (databaseUrl) {
   app.log.info('Resolver poller started (processes adapter staging events)')
 
   // URI Resolver — fetches agent registration JSON files, extracts services/wallets
-  const uriResolverPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-  startURIResolver(uriResolverPool)
+  startURIResolver(sharedPool)
   app.log.info('URI resolver started (resolves agent registration files)')
 
   // === DATA INGESTION (always runs if keys are present — ingest everything) ===
@@ -319,56 +319,47 @@ if (databaseUrl) {
 
   const baseRpcUrl = process.env.BASE_RPC_URL
   if (baseRpcUrl) {
-    const txPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-    startTxHarvester(txPool, { intervalMs: 30_000, blockBatchSize: 2000, rpcUrl: baseRpcUrl })
+    startTxHarvester(sharedPool, { intervalMs: 30_000, blockBatchSize: 2000, rpcUrl: baseRpcUrl })
     app.log.info('[ingestion:base] TX harvester started')
   }
 
   const heliusApiKey = process.env.HELIUS_API_KEY
   if (heliusApiKey) {
-    const solPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-    startSolanaTxHarvester(solPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
+    startSolanaTxHarvester(sharedPool, { intervalMs: 60_000, walletsPerCycle: 50, heliusApiKey })
     app.log.info('[ingestion:solana] TX harvester started')
   }
 
   // Moralis classifier — reclassifies Base transactions with high-accuracy labels
   const moralisApiKey = process.env.MORALIS_API_KEY
   if (moralisApiKey) {
-    const moralisPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-    startMoralisClassifier(moralisPool, { apiKey: moralisApiKey, intervalMs: 60_000, batchSize: 20 })
+    startMoralisClassifier(sharedPool, { apiKey: moralisApiKey, intervalMs: 60_000, batchSize: 20 })
     app.log.info('[ingestion:moralis] Swap classifier started (high-accuracy)')
 
     // Balance enricher — polls Moralis for token balances (reuses same API key)
-    const balancePool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-    startBalanceEnricher(balancePool, { apiKey: moralisApiKey, intervalMs: 5 * 60_000, walletsPerCycle: 20 })
+    startBalanceEnricher(sharedPool, { apiKey: moralisApiKey, intervalMs: 5 * 60_000, walletsPerCycle: 20 })
     app.log.info('[ingestion:moralis] Balance enricher started (5min cycle)')
   }
 
   // Economy metrics — hourly snapshots of economy health
-  const metricsPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-  startEconomyMetrics(metricsPool, { intervalMs: 60 * 60_000 })
+  startEconomyMetrics(sharedPool, { intervalMs: 60 * 60_000 })
   app.log.info('[metrics] Economy snapshot computer started (hourly)')
 
   // Phase B: ENS / Basename resolver (requires MORALIS_API_KEY or BASE_RPC_URL)
   if (moralisApiKey || baseRpcUrl) {
-    const ensPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-    startENSResolver(ensPool, { moralisApiKey, baseRpcUrl, intervalMs: 10 * 60_000, addressesPerCycle: 50 })
+    startENSResolver(sharedPool, { moralisApiKey, baseRpcUrl, intervalMs: 10 * 60_000, addressesPerCycle: 50 })
     app.log.info('[enrichment] ENS/Basename resolver started (10min cycle)')
   }
 
   // Phase B: Olas Marketplace enricher (always runs — fetches Olas agent metadata)
-  const olasPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-  startOlasEnricher(olasPool, { intervalMs: 15 * 60_000, agentsPerCycle: 5, timeoutMs: 10_000 })
+  startOlasEnricher(sharedPool, { intervalMs: 15 * 60_000, agentsPerCycle: 5, timeoutMs: 10_000 })
   app.log.info('[enrichment] Olas marketplace enricher started (15min cycle)')
 
   // Phase B: Gas / activity metrics computer
-  const gasPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-  startGasMetrics(gasPool, { intervalMs: 15 * 60_000 })
+  startGasMetrics(sharedPool, { intervalMs: 15 * 60_000 })
   app.log.info('[enrichment] Gas metrics computer started (15min cycle)')
 
   // Phase B: Contract interaction analyzer
-  const contractPool = new (await import('pg')).default.Pool({ connectionString: databaseUrl })
-  startContractAnalyzer(contractPool, { moralisApiKey, intervalMs: 15 * 60_000, resolveNames: !!moralisApiKey })
+  startContractAnalyzer(sharedPool, { moralisApiKey, intervalMs: 15 * 60_000, resolveNames: !!moralisApiKey })
   app.log.info('[enrichment] Contract interaction analyzer started (15min cycle)')
 
   // Plan 3A v2: Fail-fast on missing CURSOR_SECRET
