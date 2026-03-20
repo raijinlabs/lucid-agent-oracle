@@ -50,6 +50,8 @@ export { startENSResolver, resolveNames, type ENSResolverConfig, type NameResolu
 export { startOlasEnricher, enrichOlasAgents, type OlasEnricherConfig } from './adapters/olas-enricher.js'
 export { startGasMetrics, computeGasMetrics, getAgentGasMetrics, type GasMetricsConfig, type GasMetricsResult } from './adapters/gas-metrics.js'
 export { startContractAnalyzer, analyzeContractInteractions, getAgentContractInteractions, type ContractAnalyzerConfig, type ContractInteraction } from './adapters/contract-analyzer.js'
+export { startDefiEnricher, enrichDefiPositions, type DefiEnricherConfig } from './adapters/defi-enricher.js'
+export { startNftEnricher, enrichNftHoldings, type NftEnricherConfig } from './adapters/nft-enricher.js'
 
 // Identity verification (Plan 4B)
 export type { WalletVerifier } from './identity/wallet-verifier.js'

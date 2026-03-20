@@ -25,6 +25,8 @@ import {
   startOlasEnricher,
   startGasMetrics,
   startContractAnalyzer,
+  startDefiEnricher,
+  startNftEnricher,
   dispatchIdentityEvent,
   getIdentityTopics,
   adapterRegistry,
@@ -338,6 +340,14 @@ if (databaseUrl) {
     // Balance enricher — polls Moralis for token balances (reuses same API key)
     startBalanceEnricher(sharedPool, { apiKey: moralisApiKey, intervalMs: 5 * 60_000, walletsPerCycle: 20 })
     app.log.info('[ingestion:moralis] Balance enricher started (5min cycle)')
+
+    // DeFi position enricher — polls Moralis for LP/staking/lending positions
+    startDefiEnricher(sharedPool, { apiKey: moralisApiKey, intervalMs: 30 * 60_000, batchSize: 10 })
+    app.log.info('[enrichment:moralis] DeFi position enricher started (30min cycle)')
+
+    // NFT holdings enricher — polls Moralis for NFT holdings
+    startNftEnricher(sharedPool, { apiKey: moralisApiKey, intervalMs: 30 * 60_000, batchSize: 10 })
+    app.log.info('[enrichment:moralis] NFT holdings enricher started (30min cycle)')
   }
 
   // Economy metrics — hourly snapshots of economy health
