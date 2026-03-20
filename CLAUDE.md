@@ -198,6 +198,7 @@ API key via `x-api-key` header → `gateway_tenants` table → Redis cache (5min
 | Multi-signer | Done | N-of-M quorum attestation with SignerSetRegistry |
 | E2E tests | Done | 20 pipeline tests (compute → cache → serve → error paths → stale rejection) |
 | ERC-8004 Indexer | Done | Ponder indexer for Identity Registry + Reputation Registry on Base |
+| Subgraph Ingester | Done | Bulk ERC-8004 agent ingestion via The Graph subgraphs (5 chains, 110K+ agents) |
 | Wallet Resolution | Done | MetadataSet agentWallet decoding, URI resolver, on-chain proof mapping |
 | TX Harvester | Done | All ERC-20 transfers for agent wallets (Base via QuickNode, Solana via Helius) |
 | Trading Classification | Done | Heuristic swap detection + Moralis high-accuracy reclassification |
@@ -236,7 +237,8 @@ API key via `x-api-key` header → `gateway_tenants` table → Redis cache (5min
 | `packages/core/src/services/attestation-service.ts` | Ed25519 signing — single + multi-signer + SignerSetRegistry |
 | `packages/core/src/metrics.ts` | 15 custom OTel metrics (feeds, SSE, webhooks, worker, API) |
 | `packages/core/src/index.ts` | Core barrel exports |
-| `packages/core/src/adapters/chains.ts` | Chain configuration (Base, Ethereum, Solana) |
+| `packages/core/src/adapters/chains.ts` | Chain configuration (Base, Ethereum, Polygon, BSC, Monad, Solana) with subgraph URLs |
+| `packages/core/src/adapters/subgraph-ingester.ts` | Bulk ERC-8004 agent ingestion via The Graph subgraphs (5 EVM chains) |
 | `packages/core/src/adapters/enricher-utils.ts` | Shared enricher utilities (lock, batch, loop, fetch) |
 | `packages/core/src/adapters/balance-enricher.ts` | Token balance enrichment via Moralis |
 | `packages/core/src/adapters/economy-metrics.ts` | Hourly economy snapshot computation |

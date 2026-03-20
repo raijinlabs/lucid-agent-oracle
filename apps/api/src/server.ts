@@ -27,6 +27,7 @@ import {
   startContractAnalyzer,
   startDefiEnricher,
   startNftEnricher,
+  startSubgraphIngester,
   dispatchIdentityEvent,
   getIdentityTopics,
   adapterRegistry,
@@ -383,6 +384,11 @@ if (databaseUrl) {
   // Phase B: Contract interaction analyzer
   startContractAnalyzer(sharedPool, { moralisApiKey, intervalMs: 15 * 60_000, resolveNames: !!moralisApiKey })
   app.log.info('[enrichment] Contract interaction analyzer started (15min cycle)')
+
+  // Subgraph ingester — bulk-ingests ERC-8004 agents across all EVM chains via The Graph
+  // Replaces Ponder for bulk identity data (110K+ agents across 5 chains in ~90 seconds)
+  startSubgraphIngester(sharedPool, { pollIntervalMs: 5 * 60_000 })
+  app.log.info('[ingestion:subgraph] ERC-8004 subgraph ingester started (5min poll after initial sync)')
 
   // Plan 3A v2: Fail-fast on missing CURSOR_SECRET
   assertCursorSecret()

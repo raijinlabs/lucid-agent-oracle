@@ -52,6 +52,11 @@ export { startGasMetrics, computeGasMetrics, getAgentGasMetrics, type GasMetrics
 export { startContractAnalyzer, analyzeContractInteractions, getAgentContractInteractions, type ContractAnalyzerConfig, type ContractInteraction } from './adapters/contract-analyzer.js'
 export { startDefiEnricher, enrichDefiPositions, type DefiEnricherConfig } from './adapters/defi-enricher.js'
 export { startNftEnricher, enrichNftHoldings, type NftEnricherConfig } from './adapters/nft-enricher.js'
+export {
+  startSubgraphIngester, runSubgraphSync, syncSubgraphChain,
+  querySubgraph, writeAgentStagingEvent, getCheckpoint, setCheckpoint,
+  type SubgraphAgent, type SubgraphSyncResult, type SubgraphIngesterConfig,
+} from './adapters/subgraph-ingester.js'
 
 // Chain configuration + enricher utilities
 export { CHAINS, EVM_CHAINS, ALL_CHAIN_IDS, getMoralisChainParam, type ChainConfig } from './adapters/chains.js'
