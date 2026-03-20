@@ -246,6 +246,7 @@ export async function runSubgraphSync(
   const chainsWithSubgraphs = Object.entries(CHAINS).filter(
     ([, c]) => c.type === 'evm' && c.subgraphUrl,
   )
+  console.log(`[subgraph-ingester] Found ${chainsWithSubgraphs.length} chains with subgraphs: ${chainsWithSubgraphs.map(([id]) => id).join(', ')}`)
   if (chainsWithSubgraphs.length === 0) return 0
 
   const result = await withAdvisoryLock(pool, 'subgraph_ingester', async (client) => {
@@ -253,7 +254,9 @@ export async function runSubgraphSync(
 
     for (const [chainId, chainConfig] of chainsWithSubgraphs) {
       try {
+        console.log(`[subgraph-ingester] Syncing ${chainConfig.name}...`)
         const lastAgentId = await getCheckpoint(client, chainId)
+        console.log(`[subgraph-ingester] ${chainConfig.name} checkpoint: ${lastAgentId}`)
         const syncResult = await syncSubgraphChain(
           client,
           chainId,      // e.g., 'base'
