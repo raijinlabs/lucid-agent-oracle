@@ -7,7 +7,17 @@ environment_id="${RAILWAY_ENVIRONMENT_ID:?RAILWAY_ENVIRONMENT_ID is required}"
 
 message="${RAILWAY_DEPLOY_MESSAGE:-github:${GITHUB_SHA:-local}}"
 
+dockerfile=""
+case "${service}" in
+  oracle-api) dockerfile="Dockerfile.oracle" ;;
+  oracle-worker) dockerfile="Dockerfile.worker" ;;
+  oracle-ponder) dockerfile="Dockerfile.ponder" ;;
+  oracle-webhook-worker) dockerfile="Dockerfile.webhook-worker" ;;
+  *) echo "Unknown Railway service: ${service}" >&2; exit 1 ;;
+esac
+
 echo "Deploying ${service} to Railway production"
+cp "${dockerfile}" Dockerfile
 railway up \
   --detach \
   --project "${project_id}" \

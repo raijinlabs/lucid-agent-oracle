@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - all
+          - oracle-api
           - oracle-worker
           - oracle-ponder
           - oracle-webhook-worker
@@ -18,9 +19,11 @@ on:
     paths:
       - .github/workflows/deploy-railway.yml
       - .github/scripts/railway-deploy-service.sh
+      - Dockerfile.oracle
       - Dockerfile.worker
       - Dockerfile.ponder
       - Dockerfile.webhook-worker
+      - apps/api/**
       - apps/worker/**
       - apps/ponder/**
       - apps/webhook-worker/**
@@ -57,7 +60,7 @@ jobs:
           fi
 
           if [[ "${requested}" == "all" ]]; then
-            echo 'services=["oracle-worker","oracle-ponder","oracle-webhook-worker"]' >> "$GITHUB_OUTPUT"
+            echo 'services=["oracle-api","oracle-worker","oracle-ponder","oracle-webhook-worker"]' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -71,11 +74,12 @@ jobs:
             services+=("$svc")
           }
 
+          if grep -Eq '^(apps/api/|Dockerfile\.oracle|packages/|package\.json|package-lock\.json)' <<< "$changed"; then add oracle-api; fi
           if grep -Eq '^(apps/worker/|Dockerfile\.worker|packages/|package\.json|package-lock\.json)' <<< "$changed"; then add oracle-worker; fi
           if grep -Eq '^(apps/ponder/|Dockerfile\.ponder|packages/|package\.json|package-lock\.json)' <<< "$changed"; then add oracle-ponder; fi
           if grep -Eq '^(apps/webhook-worker/|Dockerfile\.webhook-worker|packages/|package\.json|package-lock\.json)' <<< "$changed"; then add oracle-webhook-worker; fi
           if grep -Eq '^(.github/workflows/deploy-railway\.yml|.github/scripts/railway-deploy-service\.sh)$' <<< "$changed"; then
-            services=(oracle-worker oracle-ponder oracle-webhook-worker)
+            services=(oracle-api oracle-worker oracle-ponder oracle-webhook-worker)
           fi
 
           if [[ ${#services[@]} -eq 0 ]]; then
