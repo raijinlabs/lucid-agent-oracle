@@ -1,0 +1,113 @@
+name: Deploy Railway
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Railway service to deploy
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - oracle-worker
+          - oracle-ponder
+          - oracle-webhook-worker
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/deploy-railway.yml
+      - .github/scripts/railway-deploy-service.sh
+      - Dockerfile.worker
+      - Dockerfile.ponder
+      - Dockerfile.webhook-worker
+      - apps/worker/**
+      - apps/ponder/**
+      - apps/webhook-worker/**
+      - packages/**
+      - package.json
+      - package-lock.json
+
+concurrency:
+  group: railway-oracle-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RAILWAY_PROJECT_ID: 779bf05d-e7a6-4e64-9acf-694d4c876b52
+  RAILWAY_ENVIRONMENT_ID: 493d3149-3819-4c53-a9f2-5e3867bd240e
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.services.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: services
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ github.event.inputs.service || 'auto' }}"
+          if [[ "${requested}" != "auto" && "${requested}" != "all" ]]; then
+            printf 'services=["%s"]\n' "${requested}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${requested}" == "all" ]]; then
+            echo 'services=["oracle-worker","oracle-ponder","oracle-webhook-worker"]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only HEAD~1 HEAD || true)"
+          services=()
+          add() {
+            local svc="$1"
+            for existing in "${services[@]}"; do
+              [[ "$existing" == "$svc" ]] && return 0
+            done
+            services+=("$svc")
+          }
+
+          if grep -Eq '^(apps/worker/|Dockerfile\.worker|packages/|package\.json|package-lock\.json)' <<< "$changed"; then add oracle-worker; fi
+          if grep -Eq '^(apps/ponder/|Dockerfile\.ponder|packages/|package\.json|package-lock\.json)' <<< "$changed"; then add oracle-ponder; fi
+          if grep -Eq '^(apps/webhook-worker/|Dockerfile\.webhook-worker|packages/|package\.json|package-lock\.json)' <<< "$changed"; then add oracle-webhook-worker; fi
+          if grep -Eq '^(.github/workflows/deploy-railway\.yml|.github/scripts/railway-deploy-service\.sh)$' <<< "$changed"; then
+            services=(oracle-worker oracle-ponder oracle-webhook-worker)
+          fi
+
+          if [[ ${#services[@]} -eq 0 ]]; then
+            echo 'services=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf '%s\n' "${services[@]}" | node -e "const fs=require('fs');const list=fs.readFileSync(0,'utf8').trim().split(/\\n/).filter(Boolean);console.log('services='+JSON.stringify(list))" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: select
+    if: ${{ needs.select.outputs.services != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        service: ${{ fromJSON(needs.select.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy ${{ matrix.service }}
+        run: bash .github/scripts/railway-deploy-service.sh "${{ matrix.service }}"
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ env.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ env.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_DEPLOY_MESSAGE: github:${{ github.repository }}@${{ github.sha }}

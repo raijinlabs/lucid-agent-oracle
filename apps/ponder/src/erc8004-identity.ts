@@ -2,6 +2,10 @@ import { ponder } from '@/generated'
 import { writeERC8004Event } from './adapter-sink.js'
 import { computeEventId } from '@lucid/oracle-core'
 
+function sanitizeChainText(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F]/g, '')
+}
+
 // ERC-8004 Identity Registry — real events from Base mainnet contract
 // Agent identity: agentRegistry = eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
 
@@ -15,7 +19,7 @@ ponder.on('IdentityRegistry:Registered', async ({ event }) => {
     event_timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
     payload_json: JSON.stringify({
       agent_id: event.args.agentId.toString(),
-      agent_uri: event.args.agentURI,
+      agent_uri: sanitizeChainText(event.args.agentURI),
       owner_address: event.args.owner,
     }),
     block_number: Number(event.block.number),
@@ -34,7 +38,7 @@ ponder.on('IdentityRegistry:URIUpdated', async ({ event }) => {
     event_timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
     payload_json: JSON.stringify({
       agent_id: event.args.agentId.toString(),
-      agent_uri: event.args.agentURI,
+      agent_uri: sanitizeChainText(event.args.agentURI),
       owner_address: event.args.owner,
     }),
     block_number: Number(event.block.number),
@@ -53,8 +57,8 @@ ponder.on('IdentityRegistry:MetadataSet', async ({ event }) => {
     event_timestamp: new Date(Number(event.block.timestamp) * 1000).toISOString(),
     payload_json: JSON.stringify({
       agent_id: event.args.agentId.toString(),
-      key_hash: event.args.keyHash,
-      value: event.args.value,       // key name string (e.g. "agentWallet", "ecosystem")
+      key_hash: sanitizeChainText(event.args.keyHash),
+      value: sanitizeChainText(event.args.value),       // key name string (e.g. "agentWallet", "ecosystem")
       data: event.args.data,          // actual value as hex bytes (e.g. wallet address)
     }),
     block_number: Number(event.block.number),

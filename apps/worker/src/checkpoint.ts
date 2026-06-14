@@ -11,6 +11,11 @@ export interface Checkpoint {
 
 export class CheckpointManager {
   private readonly pool: InstanceType<typeof Pool>
+  private readonly allowedSourceTables = [
+    'receipt_events',
+    'mcpgate_audit_log',
+    'gateway_payment_sessions',
+  ]
 
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString })
@@ -18,7 +23,11 @@ export class CheckpointManager {
 
   async loadAll(): Promise<Checkpoint[]> {
     const result = await this.pool.query(
-      'SELECT source_table, watermark_column, last_seen_ts, last_seen_id FROM oracle_worker_checkpoints'
+      `SELECT source_table, watermark_column, last_seen_ts, last_seen_id
+       FROM oracle_worker_checkpoints
+       WHERE source_table = ANY($1)
+       ORDER BY source_table`,
+      [this.allowedSourceTables],
     )
     return result.rows.map((r: Record<string, unknown>) => ({
       source_table: r.source_table as string,

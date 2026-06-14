@@ -1,6 +1,8 @@
 import { createConfig } from '@ponder/core'
 import { http } from 'viem'
 
+const baseStartBlock = Number.parseInt(process.env.PONDER_BASE_START_BLOCK ?? '41670000', 10)
+
 // ERC-8004 Identity Registry ABI — real events from deployed contract on Base
 // Verified via openchain.xyz signature database + on-chain log analysis
 const IDENTITY_REGISTRY_ABI = [
@@ -91,13 +93,13 @@ export default createConfig({
       network: 'base',
       abi: IDENTITY_REGISTRY_ABI,
       address: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
-      startBlock: 41_670_000,
+      startBlock: baseStartBlock,
     },
     ReputationRegistry: {
       network: 'base',
       abi: REPUTATION_REGISTRY_ABI,
       address: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
-      startBlock: 41_670_000,
+      startBlock: baseStartBlock,
     },
   },
 })
