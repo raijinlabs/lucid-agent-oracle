@@ -8,7 +8,7 @@ environment_id="${RAILWAY_ENVIRONMENT_ID:?RAILWAY_ENVIRONMENT_ID is required}"
 message="${RAILWAY_DEPLOY_MESSAGE:-github:${GITHUB_SHA:-local}}"
 
 echo "Deploying ${service} to Railway production"
-railway up . \
+railway up \
   --detach \
   --project "${project_id}" \
   --environment "${environment_id}" \
